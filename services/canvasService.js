@@ -1,192 +1,81 @@
 const { createCanvas, GlobalFonts, loadImage } = require("@napi-rs/canvas");
 const path  = require("path");
-const sharp = require("sharp");
 const fs    = require("fs");
-const os    = require("os");
-const { fileURLToPath } = require("url");
 
-// fluent-ffmpeg + ffmpeg-static for frame extraction
-let ffmpeg;
-try {
-  ffmpeg = require("fluent-ffmpeg");
-  const ffmpegPath  = require("ffmpeg-static");
-  const ffprobePath = require("ffprobe-static").path;
+// ── Font ──────────────────────────────────────────────────────
+// ONLY ONE font is used everywhere (title, summary, footer):
+//   server/fonts/AnekMalayalam_SemiCondensed-Bold.ttf
+const FONT_FILE = path.join(__dirname, "../fonts/AnekMalayalam_SemiCondensed-Bold.ttf");
 
-  if (ffmpegPath && fs.existsSync(ffmpegPath)) {
-    ffmpeg.setFfmpegPath(ffmpegPath);
-  } else {
-    console.error("❌ ffmpeg binary missing:", ffmpegPath);
-  }
-
-  if (ffprobePath && fs.existsSync(ffprobePath)) {
-    ffmpeg.setFfprobePath(ffprobePath);
-  } else {
-    console.error("❌ ffprobe binary missing:", ffprobePath);
-  }
-} catch (err) {
-  console.error("[Video] fluent-ffmpeg setup failed:", err.message);
-  ffmpeg = null;
+if (fs.existsSync(FONT_FILE)) {
+  GlobalFonts.registerFromPath(FONT_FILE, "Malayalam");
+  console.log("[Fonts] using", path.basename(FONT_FILE));
+} else {
+  console.error("❌ AnekMalayalam_SemiCondensed-Bold.ttf not found in server/fonts");
 }
 
-// ── Fonts ─────────────────────────────────────────────────────
-GlobalFonts.registerFromPath(
-  path.join(__dirname, "../fonts/AnekMalayalam_SemiCondensed-Bold.ttf"),
-  "Malayalam"
-);
-GlobalFonts.registerFromPath(
-  path.join(__dirname, "../fonts/AnekMalayalam_SemiCondensed-Bold.ttf"),
-  "English"
-);
+const HEAD_FONT = "Malayalam";
+const SUM_FONT  = "Malayalam";
+const FOOT_FONT = "Malayalam";
 
-// Optional HEAVY Malayalam font (first one found in server/fonts/ is used).
-const HEAVY_CANDIDATES = [
-  "AnekMalayalam_SemiCondensed-ExtraBold.ttf",
-  "AnekMalayalam-ExtraBold.ttf",
-  "AnekMalayalam_Condensed-ExtraBold.ttf",
-  "Manjari-Bold.ttf",
-  "NotoSansMalayalam-Black.ttf",
-].map((f) => path.join(__dirname, "../fonts", f));
-
-let hasHeavy = false;
-for (const p of HEAVY_CANDIDATES) {
-  try {
-    if (fs.existsSync(p)) {
-      GlobalFonts.registerFromPath(p, "MalayalamHeavy");
-      hasHeavy = true;
-      console.log("[Fonts] heavy headline font:", path.basename(p));
-      break;
-    }
-  } catch (e) {
-    console.warn("[Fonts] could not load", p, e.message);
-  }
-}
-
-// Optional clean Latin UI font for the date + channel bar (Roboto / Inter look).
-const UI_CANDIDATES = [
-  "Roboto-Medium.ttf",
-  "Roboto-Regular.ttf",
-  "Inter-Medium.ttf",
-  "Inter-Regular.ttf",
-  "Poppins-Medium.ttf",
-].map((f) => path.join(__dirname, "../fonts", f));
-
-let hasUi = false;
-for (const p of UI_CANDIDATES) {
-  try {
-    if (fs.existsSync(p)) {
-      GlobalFonts.registerFromPath(p, "LatinUI");
-      hasUi = true;
-      console.log("[Fonts] UI font:", path.basename(p));
-      break;
-    }
-  } catch (e) {
-    console.warn("[Fonts] could not load", p, e.message);
-  }
-}
-
-const HEAD_FONT  = hasHeavy ? "MalayalamHeavy, Malayalam, English" : "Malayalam, English";
-const LATIN_FONT = hasUi ? "LatinUI, English, Malayalam" : "English, Malayalam";
-
-// ── Asset paths ──────────────────────────────────────────────
-const FALLBACK_VIDEO_PATH =
-  process.env.FALLBACK_VIDEO ||
-  path.join(__dirname, "../assets/ad_fallback.mp4");
-
-// Default channel logo (square PNG). Used only when the right panel
-// does not send newsItem.channelLogo. If the file is missing, a letter badge is drawn.
-const LOGO_PATH =
-  process.env.POSTER_LOGO ||
-  path.join(__dirname, "../assets/channel-logo.png");
-
-const W            = 1080;
-const H            = 1350;          // 4:5 poster
-const DEFAULT_AD_H = 180;
-const MAX_AD_H     = 320;
+// Poster size. Taller poster = more room for the photo.
+//   1350 = 4:5   |   1620 = 2:3 (default)   |   1920 = 9:16
+const W = 1080;
+const H = 1620;
 
 // ═══════════════════════════════════════════════════════════════
 // DESIGN CONSTANTS
+//
+//   top        TITLE   – centred, bold. Light-yellow lines, LAST line white
+//   middle     PHOTO   – full width, melting into BLACK at the bottom
+//                        (several images → collage: 1 big left, 2 stacked right)
+//   bottom     SUMMARY – first line black text on a LIGHT-YELLOW box,
+//                        remaining lines white text on black
+//   footer     brand name on the left + dashed line to the right
+//   background plain black
 // ═══════════════════════════════════════════════════════════════
 
-const COLOR_BG       = "#ffffff";
-const COLOR_HEAD     = "#e4122a";     // red headline
-const COLOR_SUB      = "#111111";     // black sub-headline
-const COLOR_DATE     = "#222222";
-const COLOR_LOGO_BG  = "#e8202c";
-const COLOR_BAR      = "#33cfff";     // cyan channel bar
-const COLOR_BAR_TEXT = "#14233a";
+const BG     = "#000000";   // background
+const YELLOW = "#fff59d";   // light yellow (was red)
+const WHITE  = "#ffffff";   // white (was black)
+const INK    = "#0b0b0b";   // dark text used on top of the light-yellow box
 
-// Photo box (rounded, inset from the sides, sits at the very top)
-const PHOTO_X       = 48;
-const PHOTO_Y       = 0;
-const PHOTO_W       = W - PHOTO_X * 2;
-const PHOTO_H       = 594;
-const PHOTO_RADIUS  = 56;
-const PHOTO_GAP     = 6;              // white gap between photos when 2–3 are used
-const PHOTO_SPLIT   = 0.34;
-const PHOTO_FOCUS_Y = 0.20;
-const MAX_PHOTOS    = 3;
-const PHOTO_FETCH_TIMEOUT_MS = 15000;
-const PHOTO_MAX_SIDE = 2400;
+// Title
+const TITLE_PAD_TOP    = 34;
+const TITLE_PAD_BOTTOM = 26;
+const TITLE_MAX_W      = Math.round(W * 0.93);
+const TITLE_MAX        = 92;
+const TITLE_MIN        = 38;
+const TITLE_LH         = 1.22;
+const TITLE_MAX_LINES  = 4;
+const TITLE_MAX_H      = Math.round(H * 0.27);   // title block never taller than this
 
-// Date (top-left, over the photo)
-const DATE_X    = 134;
-const DATE_Y    = 80;                 // vertical centre
-const DATE_FONT = 38;
+// Photo
+const PHOTO_MIN_H     = Math.round(H * 0.28);    // photo is never smaller than this
+const PHOTO_OVERLAP   = 30;                      // photo runs this far behind the summary
+const PHOTO_FADE_FRAC = 0.22;                    // fade-to-black = 22% of photo height
+const PHOTO_FADE_MAX  = 220;                     // ...but never longer than this (px)
+const PHOTO_GAP       = 4;                       // black gap between collage images
+const PHOTO_FOCUS_Y   = 0.2;                     // 0 = keep top of photo, 1 = keep bottom
 
-// Text block (red headline + black sub-headline)
-const TEXT_TOP    = 640;
-const TEXT_BOTTOM = 1195;
+// Summary
+const SUM_MAX_W     = Math.round(W * 0.95);
+const SUM_MAX       = 88;
+const SUM_MIN       = 52;
+const SUM_LH        = 1.24;
+const SUM_MAX_LINES = 6;
+const SUM_MAX_WORDS = 18;                        // summary is cut after this many words, then "..."
+const SUM_ELLIPSIS  = "...";
+const BOX_PAD_X     = 16;                        // yellow box padding left/right
 
-const HEAD_TARGET_W  = Math.round(W * 0.87);
-const HEAD_MAX       = 108;
-const HEAD_MIN       = 40;
-const HEAD_MAX_LINES = 5;
-const SUB_MAX_LINES  = 3;
-const SUB_RATIO      = 0.82;          // sub-headline size relative to headline
-const SUB_GAP        = 6;             // extra space between red and black blocks
-const HEAD_LH_TRY    = [1.16, 1.12, 1.08, 1.04, 1.0];
-const HEAD_BOLD_W    = 0.030;         // red headline weight (higher = bolder)
-const SUB_BOLD_W     = 0;             // black sub-headline: no extra stroke = thinner
+// Footer
+const FOOTER_H      = 100;                       // space reserved at the bottom
+const FOOTER_PAD_X  = 28;
+const BRAND_NAME    = process.env.BRAND_NAME || "KERALA NEWS 24 X 7";
 
-// Logo + channel bar
-const LOGO_SIZE     = 98;
-const LOGO_CENTER_Y = 1256;
-const BAR_X         = 165;
-const BAR_W         = W - BAR_X * 2;
-const BAR_Y         = 1280;
-const BAR_H         = H - BAR_Y;
-const BAR_RADIUS    = 20;
-const BAR_FONT      = 38;
-
-// Channel name (comes from the right panel: newsItem.channelName)
-const CHANNEL_NAME_DEFAULT = "KERALA NEWS 24 X 7";
-
-function getChannelName(newsItem) {
-  const v = newsItem.channelName || newsItem.siteText;
-  return typeof v === "string" && v.trim() ? v.trim() : CHANNEL_NAME_DEFAULT;
-}
-
-function computeAdHeight(adImg) {
-  if (!adImg) return DEFAULT_AD_H;
-  const naturalH = Math.round((adImg.height / adImg.width) * W);
-  return Math.min(MAX_AD_H, Math.max(DEFAULT_AD_H, naturalH));
-}
-
-const MALAYALAM_BOLD_W = 0.012;
-
-function fillTextBold(ctx, text, x, y, fontSize, extraWidth = 0) {
-  const lineWidth = Math.max(0, fontSize * MALAYALAM_BOLD_W + extraWidth);
-  ctx.save();
-  if (lineWidth > 0.01) {
-    ctx.lineJoin    = "round";
-    ctx.miterLimit  = 2;
-    ctx.lineWidth   = lineWidth;
-    ctx.strokeStyle = ctx.fillStyle;
-    ctx.strokeText(text, x, y);
-  }
-  ctx.fillText(text, x, y);
-  ctx.restore();
-}
+// Text thickness (a single semi-condensed bold font, so thicken it slightly)
+const TITLE_STROKE = 0.03;
+const SUM_STROKE   = 0.012;
 
 // ═══════════════════════════════════════════════════════════════
 // HELPERS
@@ -199,562 +88,21 @@ function toNodeBuffer(data) {
   throw new TypeError(`toNodeBuffer: unsupported type ${Object.prototype.toString.call(data)}`);
 }
 
-async function fetchBuffer(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
-  return toNodeBuffer(await res.arrayBuffer());
-}
-
-async function fetchAsJpegBuffer(url) {
-  const raw = await fetchBuffer(url);
-  return toNodeBuffer(await sharp(raw).jpeg().toBuffer());
-}
-
 async function canvasToBuffer(canvas, mime = "image/png") {
   const result = canvas.toBuffer(mime);
   return Buffer.isBuffer(result) ? result : toNodeBuffer(await result);
 }
 
-// Rounded-rectangle path with per-corner radii: r = [tl, tr, br, bl]
-function roundedRectPath(ctx, x, y, w, h, r) {
-  const [tl, tr, br, bl] = Array.isArray(r) ? r : [r, r, r, r];
-  ctx.beginPath();
-  ctx.moveTo(x + tl, y);
-  ctx.lineTo(x + w - tr, y);
-  ctx.arcTo(x + w, y,     x + w, y + tr,     tr);
-  ctx.lineTo(x + w, y + h - br);
-  ctx.arcTo(x + w, y + h, x + w - br, y + h, br);
-  ctx.lineTo(x + bl, y + h);
-  ctx.arcTo(x,     y + h, x, y + h - bl,     bl);
-  ctx.lineTo(x, y + tl);
-  ctx.arcTo(x,     y,     x + tl, y,         tl);
-  ctx.closePath();
-}
-
 // ═══════════════════════════════════════════════════════════════
-// PHOTO LOADING  (robust: url / path / file:// / data: / Buffer / {url})
-// ═══════════════════════════════════════════════════════════════
-
-const BROWSER_HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
-    "Chrome/124.0 Safari/537.36",
-  "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-};
-
-const isBinary = (v) =>
-  Buffer.isBuffer(v) || v instanceof ArrayBuffer || ArrayBuffer.isView(v);
-
-function resolvePhotoSource(s) {
-  if (!s) return null;
-  if (typeof s === "string") return s.trim() || null;
-  if (isBinary(s)) return s;
-  if (typeof s === "object") {
-    return resolvePhotoSource(s.url || s.src || s.path || s.secure_url || s.buffer || null);
-  }
-  return null;
-}
-
-function describeSource(s) {
-  if (isBinary(s)) return `<buffer ${s.byteLength || s.length} bytes>`;
-  const t = String(s);
-  return t.length > 140 ? t.slice(0, 140) + "…" : t;
-}
-
-async function loadPhotoBuffer(src) {
-  if (isBinary(src)) return toNodeBuffer(src);
-  if (typeof src !== "string") throw new Error("unsupported photo source");
-
-  let s = src.trim();
-
-  // data URI
-  if (s.startsWith("data:")) {
-    const comma = s.indexOf(",");
-    if (comma < 0) throw new Error("bad data URI");
-    const isB64 = /;base64/i.test(s.slice(0, comma));
-    return isB64
-      ? Buffer.from(s.slice(comma + 1), "base64")
-      : Buffer.from(decodeURIComponent(s.slice(comma + 1)), "utf8");
-  }
-
-  // protocol-relative URL
-  if (s.startsWith("//")) s = "https:" + s;
-
-  // http(s) URL
-  if (/^https?:\/\//i.test(s)) {
-    let url = s;
-    try { url = new URL(s).href; } catch { /* keep as is */ }
-    const res = await fetch(url, {
-      headers:  BROWSER_HEADERS,
-      redirect: "follow",
-      signal:   AbortSignal.timeout(PHOTO_FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status} fetching photo`);
-    const buf = toNodeBuffer(await res.arrayBuffer());
-    if (!buf.length) throw new Error("photo response was empty");
-    return buf;
-  }
-
-  // file:// URL
-  if (/^file:\/\//i.test(s)) s = fileURLToPath(s);
-
-  // local path
-  const candidates = [
-    s,
-    path.resolve(s),
-    path.join(__dirname, "..", s.replace(/^[/\\]+/, "")),
-    path.join(process.cwd(), s.replace(/^[/\\]+/, "")),
-  ];
-  for (const c of candidates) {
-    try {
-      if (fs.existsSync(c) && fs.statSync(c).isFile()) return fs.readFileSync(c);
-    } catch { /* try next */ }
-  }
-  throw new Error("photo file not found");
-}
-
-async function loadPhoto(rawSrc) {
-  const src = resolvePhotoSource(rawSrc);
-  if (!src) throw new Error("empty photo source");
-
-  const raw = await loadPhotoBuffer(src);
-
-  try {
-    const jpeg = await sharp(raw, { failOn: "none" })
-      .rotate()
-      .flatten({ background: "#000000" })
-      .resize({
-        width: PHOTO_MAX_SIDE, height: PHOTO_MAX_SIDE,
-        fit: "inside", withoutEnlargement: true,
-      })
-      .jpeg({ quality: 92 })
-      .toBuffer();
-    return await loadImage(jpeg);
-  } catch (e) {
-    console.warn("[Poster] sharp could not convert the photo, trying it as is:", e.message);
-    return await loadImage(raw);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// AI DIRECTOR (Gemini)
-// ═══════════════════════════════════════════════════════════════
-
-let _director = null;
-function getDirector() {
-  if (_director !== null) return _director || null;
-  try {
-    _director = require("./geminiArtDirector");
-  } catch (e) {
-    console.warn("[Poster] geminiArtDirector not found next to this file – using the local split:", e.message);
-    _director = false;
-  }
-  return _director || null;
-}
-
-async function askDirector(newsItem) {
-  if (newsItem.direction) return newsItem.direction;
-  if (newsItem.aiDirector === false) return null;
-  const d = getDirector();
-  if (!d || !d.isEnabled()) return null;
-  try {
-    return await d.getDirection(newsItem, {
-      layout:     true,
-      focus:      getPhotoSources(newsItem).length === 1,
-      photoRatio: (PHOTO_W / PHOTO_H).toFixed(2),
-    });
-  } catch (e) {
-    console.warn("[Poster] director failed:", e.message);
-    return null;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// VIDEO FRAME EXTRACTION
-// ═══════════════════════════════════════════════════════════════
-
-function extractVideoFrame(videoPath, atSecond = 1) {
-  return new Promise((resolve) => {
-    if (!ffmpeg) {
-      console.warn("[Video] fluent-ffmpeg not available — skipping frame extract");
-      return resolve(null);
-    }
-
-    if (!fs.existsSync(videoPath)) {
-      console.warn("[Video] File not found:", videoPath);
-      return resolve(null);
-    }
-
-    try {
-      const stat = fs.statSync(videoPath);
-      if (stat.size === 0) {
-        console.warn("[Video] File is zero bytes:", videoPath);
-        return resolve(null);
-      }
-    } catch (e) {
-      console.warn("[Video] Could not stat file:", videoPath, e.message);
-      return resolve(null);
-    }
-
-    const tmpFile = path.join(os.tmpdir(), `ad_frame_${Date.now()}.png`);
-    let settled = false;
-
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      resolve(value);
-    };
-
-    const timer = setTimeout(() => {
-      console.error("[Video] Frame extraction timed out:", videoPath);
-      fs.unlink(tmpFile, () => {});
-      finish(null);
-    }, 15000);
-
-    ffmpeg(videoPath)
-      .on("error", (err) => {
-        clearTimeout(timer);
-        console.error("[Video] Frame extraction failed:", err.message);
-        fs.unlink(tmpFile, () => {});
-        finish(null);
-      })
-      .on("end", async () => {
-        clearTimeout(timer);
-        try {
-          if (!fs.existsSync(tmpFile)) {
-            console.error("[Video] Expected frame file was never written:", tmpFile);
-            return finish(null);
-          }
-          const raw     = fs.readFileSync(tmpFile);
-          const jpegBuf = toNodeBuffer(await sharp(raw).jpeg().toBuffer());
-          fs.unlink(tmpFile, () => {});
-          finish(jpegBuf);
-        } catch (e) {
-          console.error("[Video] Sharp conversion failed:", e.message);
-          fs.unlink(tmpFile, () => {});
-          finish(null);
-        }
-      })
-      .screenshots({
-        timestamps: [atSecond],
-        filename:   path.basename(tmpFile),
-        folder:     path.dirname(tmpFile),
-        size:       `${W}x?`,
-      });
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════
-// AD STRIP (unchanged)
-// ═══════════════════════════════════════════════════════════════
-
-function drawAdStrip(ctx, adImg, yOffset, adH) {
-
-  ctx.fillStyle = "#000000";
-  ctx.fillRect(0, yOffset, W, adH);
-
-  if (adImg) {
-    const scale = Math.max(W / adImg.width, adH / adImg.height);
-    const drawW = adImg.width  * scale;
-    const drawH = adImg.height * scale;
-    const drawX = (W - drawW) / 2;
-    const drawY = yOffset + (adH - drawH) / 2;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, yOffset, W, adH);
-    ctx.clip();
-    ctx.drawImage(adImg, drawX, drawY, drawW, drawH);
-    ctx.restore();
-
-    const lineGrad = ctx.createLinearGradient(0, 0, W, 0);
-    lineGrad.addColorStop(0,   "rgba(255,180,0,0)");
-    lineGrad.addColorStop(0.2, "rgba(255,180,0,0.8)");
-    lineGrad.addColorStop(0.8, "rgba(255,180,0,0.8)");
-    lineGrad.addColorStop(1,   "rgba(255,180,0,0)");
-    ctx.fillStyle = lineGrad;
-    ctx.fillRect(0, yOffset, W, 3);
-
-    return;
-  }
-
-  const bg = ctx.createLinearGradient(0, yOffset, 0, yOffset + adH);
-  bg.addColorStop(0, "#0d1b4b");
-  bg.addColorStop(1, "#091230");
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, yOffset, W, adH);
-
-  const lineGrad = ctx.createLinearGradient(0, 0, W, 0);
-  lineGrad.addColorStop(0,   "rgba(255,180,0,0)");
-  lineGrad.addColorStop(0.2, "rgba(255,180,0,1)");
-  lineGrad.addColorStop(0.8, "rgba(255,180,0,1)");
-  lineGrad.addColorStop(1,   "rgba(255,180,0,0)");
-
-  ctx.fillStyle = lineGrad;
-  ctx.fillRect(0, yOffset, W, 3);
-
-  ctx.save();
-  ctx.globalAlpha = 0.06;
-  ctx.fillStyle   = "#ffffff";
-  for (let x = 40; x < W; x += 60) {
-    for (let y = yOffset + 20; y < yOffset + adH - 20; y += 40) {
-      ctx.beginPath();
-      ctx.arc(x, y, 2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-  ctx.restore();
-
-  ctx.save();
-  ctx.font         = "bold 52px English";
-  ctx.fillStyle    = "rgba(255,200,60,0.22)";
-  ctx.textAlign    = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("📢", W / 2, yOffset + adH / 2 - 8);
-  ctx.restore();
-
-  const line1    = "ADVERTISE WITH US";
-  const line2    = "Send us a message";
-  const LINE_GAP = 58;
-  const midY     = yOffset + adH / 2;
-
-  ctx.save();
-  ctx.textAlign    = "center";
-  ctx.textBaseline = "middle";
-  ctx.shadowColor  = "rgba(0,0,0,0.8)";
-  ctx.shadowBlur   = 14;
-
-  ctx.font      = "42px Malayalam, English";
-  ctx.fillStyle = "rgba(255,255,255,0.92)";
-  fillTextBold(ctx, line1, W / 2, midY - LINE_GAP / 2, 42);
-
-  const goldGrad = ctx.createLinearGradient(0, midY, 0, midY + 50);
-  goldGrad.addColorStop(0, "#ffe566");
-  goldGrad.addColorStop(1, "#ffaa00");
-
-  ctx.font      = "44px Malayalam, English";
-  ctx.fillStyle = goldGrad;
-  fillTextBold(ctx, line2, W / 2, midY + LINE_GAP / 2, 44);
-
-  ctx.restore();
-
-  ctx.fillStyle = lineGrad;
-  ctx.fillRect(0, yOffset + adH - 3, W, 3);
-}
-
-// ═══════════════════════════════════════════════════════════════
-// PHOTOS  –  rounded box at the top, light grey placeholder if missing
-//   newsItem.images = [url/path/buffer, ...]  (1–3)   or  newsItem.image
-//   newsItem.showPhoto = false → no photos
-// ═══════════════════════════════════════════════════════════════
-
-function getPhotoSources(newsItem) {
-  if (newsItem.showPhoto === false) return [];
-  let list = [];
-  if (Array.isArray(newsItem.images) && newsItem.images.length) list = newsItem.images;
-  else if (Array.isArray(newsItem.image))                       list = newsItem.image;
-  else if (newsItem.image)                                      list = [newsItem.image];
-  else if (newsItem.imageUrl)                                   list = [newsItem.imageUrl];
-
-  return list
-    .map(resolvePhotoSource)
-    .filter(Boolean)
-    .slice(0, MAX_PHOTOS);
-}
-
-async function drawPhotos(ctx, sources, focus) {
-  const n  = sources.length;
-  const pw = PHOTO_W;
-  const ph = PHOTO_H;
-
-  // column widths (gaps are painted white on top)
-  let widths;
-  if (n <= 1)       widths = [pw];
-  else if (n === 2) { const a = Math.round(pw * PHOTO_SPLIT); widths = [a, pw - a]; }
-  else {
-    const a = Math.round(pw / 3);
-    widths = [a, a, pw - 2 * a];
-  }
-
-  const imgs = await Promise.all(
-    sources.map(async (s) => {
-      try {
-        return await loadPhoto(s);
-      } catch (e) {
-        console.error(`[Poster] photo failed (${describeSource(s)}): ${e.message}`);
-        return null;
-      }
-    })
-  );
-
-  // draw all photos on their own layer first
-  const layer = createCanvas(pw, ph);
-  const lc    = layer.getContext("2d");
-  lc.fillStyle = "#e9ecef";
-  lc.fillRect(0, 0, pw, ph);
-
-  let x = 0;
-  imgs.forEach((img, i) => {
-    const cw = widths[i];
-
-    lc.save();
-    lc.beginPath();
-    lc.rect(x, 0, cw, ph);
-    lc.clip();
-
-    if (img) {
-      const scale = Math.max(cw / img.width, ph / img.height);
-      const dw = img.width  * scale;
-      const dh = img.height * scale;
-      let dx = x + (cw - dw) / 2;
-      let dy = -Math.max(0, dh - ph) * PHOTO_FOCUS_Y;
-
-      // AI photo focus (single photo only)
-      if (n === 1 && focus && Number.isFinite(focus.x) && Number.isFinite(focus.y)) {
-        dx = Math.min(0, Math.max(pw - dw, pw / 2 - focus.x * dw));
-        dy = Math.min(0, Math.max(ph - dh, ph * 0.40 - focus.y * dh));
-      }
-      lc.drawImage(img, dx, dy, dw, dh);
-    }
-    lc.restore();
-
-    // white divider between photos
-    if (i > 0) {
-      lc.fillStyle = COLOR_BG;
-      lc.fillRect(x - PHOTO_GAP / 2, 0, PHOTO_GAP, ph);
-    }
-    x += cw;
-  });
-
-  // paste the layer through a rounded-rectangle clip
-  ctx.save();
-  roundedRectPath(ctx, PHOTO_X, PHOTO_Y, pw, ph, PHOTO_RADIUS);
-  ctx.clip();
-  ctx.drawImage(layer, PHOTO_X, PHOTO_Y);
-  ctx.restore();
-}
-
-// ═══════════════════════════════════════════════════════════════
-// DATE  (top-left over the photo, dd.mm.yyyy)
-// ═══════════════════════════════════════════════════════════════
-
-function formatDate(v) {
-  let d;
-  if (v instanceof Date) d = v;
-  else if (typeof v === "string" && v.trim()) {
-    // already formatted like 18.11.2026 → keep as is
-    if (/^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}$/.test(v.trim())) return v.trim().replace(/[/-]/g, ".");
-    d = new Date(v);
-  } else if (typeof v === "number") d = new Date(v);
-  else d = new Date();
-
-  if (isNaN(d.getTime())) d = new Date();
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${dd}.${mm}.${d.getFullYear()}`;
-}
-
-function drawDate(ctx, newsItem) {
-  if (newsItem.showDate === false) return;
-  const label = formatDate(newsItem.date || newsItem.publishedAt || newsItem.createdAt);
-
-  ctx.save();
-  ctx.font         = `${DATE_FONT}px ${LATIN_FONT}`;
-  ctx.fillStyle    = newsItem.dateColor || COLOR_DATE;
-  ctx.textAlign    = "left";
-  ctx.textBaseline = "middle";
-  ctx.fillText(label, DATE_X, DATE_Y);
-  ctx.restore();
-}
-
-// ═══════════════════════════════════════════════════════════════
-// LOGO + CHANNEL BAR
-//   newsItem.channelName  → text in the cyan bar (default "flashkeralam")
-//   newsItem.channelLogo  → logo above the bar (url / path / buffer / data URI)
-//   newsItem.showFooter   → false hides logo + bar
-// ═══════════════════════════════════════════════════════════════
-
-let _logoImg;   // undefined = not tried yet, null = not available
-async function getLogoImage() {
-  if (_logoImg !== undefined) return _logoImg;
-  try {
-    _logoImg = fs.existsSync(LOGO_PATH) ? await loadImage(fs.readFileSync(LOGO_PATH)) : null;
-  } catch (e) {
-    console.warn("[Poster] logo image failed, using letter badge:", e.message);
-    _logoImg = null;
-  }
-  return _logoImg;
-}
-
-async function drawLogo(ctx, newsItem) {
-  const size = LOGO_SIZE;
-  const x = (W - size) / 2;
-  const y = LOGO_CENTER_Y - size / 2;
-
-  // 1) logo sent from the right panel (keeps PNG transparency)
-  let img = null;
-  const custom = resolvePhotoSource(newsItem.channelLogo || newsItem.logo);
-  if (custom) {
-    try {
-      img = await loadImage(await loadPhotoBuffer(custom));
-    } catch (e) {
-      console.warn("[Poster] channel logo failed:", e.message);
-    }
-  }
-  // 2) logo file in assets/
-  if (!img) img = await getLogoImage();
-
-  if (img) {
-    const s  = Math.min(size / img.width, size / img.height);
-    const dw = img.width * s, dh = img.height * s;
-    ctx.save();
-    roundedRectPath(ctx, x, y, size, size, size * 0.2);
-    ctx.clip();
-    ctx.drawImage(img, x + (size - dw) / 2, y + (size - dh) / 2, dw, dh);
-    ctx.restore();
-    return;
-  }
-
-  // 3) fallback badge: red rounded square with the channel's first letter
-  const initial = (Array.from(getChannelName(newsItem))[0] || "F").toUpperCase();
-  ctx.save();
-  ctx.fillStyle = COLOR_LOGO_BG;
-  roundedRectPath(ctx, x, y, size, size, size * 0.2);
-  ctx.fill();
-  ctx.fillStyle    = "#ffffff";
-  ctx.font         = `bold ${Math.round(size * 0.62)}px ${LATIN_FONT}`;
-  ctx.textAlign    = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(initial, x + size / 2, y + size / 2 + size * 0.03);
-  ctx.restore();
-}
-
-function drawSiteBar(ctx, newsItem) {
-  const text = getChannelName(newsItem);
-
-  ctx.save();
-  ctx.fillStyle = COLOR_BAR;
-  // rounded top corners only, runs to the bottom edge of the poster
-  roundedRectPath(ctx, BAR_X, BAR_Y, BAR_W, BAR_H, [BAR_RADIUS, BAR_RADIUS, 0, 0]);
-  ctx.fill();
-
-  // shrink long names so they always fit inside the bar
-  let fontPx = BAR_FONT;
-  ctx.font = `${fontPx}px ${LATIN_FONT}`;
-  while (ctx.measureText(text).width > BAR_W - 60 && fontPx > 20) {
-    fontPx -= 2;
-    ctx.font = `${fontPx}px ${LATIN_FONT}`;
-  }
-
-  ctx.fillStyle    = COLOR_BAR_TEXT;
-  ctx.textAlign    = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, W / 2, BAR_Y + 44);
-  ctx.restore();
-}
-
-// ═══════════════════════════════════════════════════════════════
-// TEXT  –  red lines / black lines
+// TEXT CLEANING  –  what goes in the TITLE and what goes in the SUMMARY
+//
+//   newsItem.title                  → top title
+//   newsItem.summary                → bottom summary (cut to SUM_MAX_WORDS + "...")
+//        (fallbacks: subtitle, description, caption, summaryLines, subTitleLines)
+//   newsItem.title = "title | summary"  also works when no summary is given
+//   newsItem.titleLines / summaryLines  force the line breaks
+//   newsItem.summaryMaxWords        override the word limit for one post
+//   newsItem.uppercase = true       upper-case everything (English posts)
 // ═══════════════════════════════════════════════════════════════
 
 function cleanText(s, upper) {
@@ -763,6 +111,16 @@ function cleanText(s, upper) {
 }
 
 const wordsOf = (s) => String(s).split(" ").filter(Boolean);
+
+// Keep the first `max` words; add "..." only when something was cut.
+function limitWords(text, max) {
+  const t = String(text || "").trim();
+  if (!t || !max) return t;
+  const words = wordsOf(t);
+  if (words.length <= max) return t;
+  const cut = words.slice(0, max).join(" ").replace(/[\s,;:.\-–—]+$/u, "");
+  return cut + SUM_ELLIPSIS;
+}
 
 function joinLines(v) {
   return Array.isArray(v)
@@ -776,37 +134,7 @@ function linesOf(v, c) {
   return out.length ? out : null;
 }
 
-function sanitizeAiLayout(layout, rawTitle, c) {
-  if (!layout || !Array.isArray(layout.headLines) || !layout.headLines.length) return null;
-  const head = layout.headLines.map(c).filter(Boolean);
-  const sub  = (Array.isArray(layout.subLines) ? layout.subLines : []).map(c).filter(Boolean);
-  if (!head.length) return null;
-
-  const got  = wordsOf([...head, ...sub].join(" "));
-  const want = wordsOf(c(rawTitle));
-  if (got.length !== want.length || got.some((w, i) => w !== want[i])) return null;
-  return { head, sub };
-}
-
-function localSplit(words) {
-  const N = words.length;
-  if (N < 4) return { head: words, sub: [] };
-
-  const target = Math.round(N * 0.66);
-  const lo = Math.max(2, Math.ceil(N * 0.5));
-  const hi = Math.min(N - 1, Math.ceil(N * 0.8));
-
-  let cut = Math.max(lo, Math.min(hi, target));
-  let bestDist = Infinity;
-  for (let n = lo; n <= hi; n++) {
-    if (/[’”"'.!?;:,।…]$/.test(words[n - 1])) {
-      const d = Math.abs(n - target);
-      if (d < bestDist) { bestDist = d; cut = n; }
-    }
-  }
-  return { head: words.slice(0, cut), sub: words.slice(cut) };
-}
-
+// → { head: {text, lines|null} | null, sub: {text, lines|null} | null }
 function buildCopy(newsItem) {
   const up = newsItem.uppercase === true;
   const c  = (s) => cleanText(s, up);
@@ -816,49 +144,47 @@ function buildCopy(newsItem) {
     return t ? { text: t, lines: lines && lines.length ? lines : null } : null;
   };
 
-  const rawTitle = joinLines(newsItem.titleLines) || String(newsItem.title || "");
+  // summary: limit by words; forced line breaks are dropped if the text was cut
+  const maxWords = Number.isInteger(newsItem.summaryMaxWords) && newsItem.summaryMaxWords > 0
+    ? newsItem.summaryMaxWords
+    : SUM_MAX_WORDS;
 
-  // 1) explicit subtitle
-  const subRaw = joinLines(newsItem.subTitleLines) || String(newsItem.subtitle || "");
-  if (c(subRaw)) {
-    const head = mk(rawTitle, linesOf(newsItem.titleLines, c));
-    if (!head) return { head: mk(subRaw, linesOf(newsItem.subTitleLines, c)), sub: null };
-    return { head, sub: mk(subRaw, linesOf(newsItem.subTitleLines, c)) };
-  }
-
-  // 2) "red | black"
-  if (rawTitle.includes("|")) {
-    const parts = rawTitle.split("|").map(c).filter(Boolean);
-    if (parts.length === 1) return { head: mk(parts[0]), sub: null };
-    return {
-      head: mk(parts.slice(0, -1).join(" ")),
-      sub:  mk(parts[parts.length - 1]),
-    };
-  }
-
-  // 2b) explicit red line breaks, no subtitle
-  const fixed = linesOf(newsItem.titleLines, c);
-  if (fixed) return { head: mk(fixed.join(" "), fixed), sub: null };
-
-  // 3) lines chosen by the AI director
-  const ai = sanitizeAiLayout(newsItem.aiLayout, rawTitle, c);
-  if (ai) {
-    return {
-      head: mk(ai.head.join(" "), ai.head),
-      sub:  ai.sub.length ? mk(ai.sub.join(" "), ai.sub) : null,
-    };
-  }
-
-  // 4) local split
-  const words = wordsOf(c(rawTitle));
-  if (!words.length) return { head: null, sub: null };
-  if (newsItem.autoTiers === false) return { head: mk(words.join(" ")), sub: null };
-
-  const sp = localSplit(words);
-  return {
-    head: mk(sp.head.join(" ")),
-    sub:  sp.sub.length ? mk(sp.sub.join(" ")) : null,
+  const mkSub = (text, lines) => {
+    const full    = c(text);
+    const trimmed = limitWords(full, maxWords);
+    if (!trimmed) return null;
+    const keepLines = trimmed === full && lines && lines.length ? lines : null;
+    return { text: trimmed, lines: keepLines };
   };
+
+  let titleRaw = joinLines(newsItem.titleLines) || String(newsItem.title || "");
+  let subRaw   =
+    joinLines(newsItem.summaryLines) ||
+    String(newsItem.summary || "") ||
+    joinLines(newsItem.subTitleLines) ||
+    String(newsItem.subtitle || "") ||
+    String(newsItem.description || "") ||
+    String(newsItem.caption || "");
+
+  let titleLines = linesOf(newsItem.titleLines, c);
+  let subLines   = linesOf(newsItem.summaryLines || newsItem.subTitleLines, c);
+
+  // "title | summary"
+  if (!c(subRaw) && titleRaw.includes("|")) {
+    const parts = titleRaw.split("|").map(c).filter(Boolean);
+    if (parts.length >= 2) {
+      titleRaw   = parts.slice(0, -1).join(" ");
+      subRaw     = parts[parts.length - 1];
+      titleLines = null;
+    }
+  }
+
+  const head = mk(titleRaw, titleLines);
+  const sub  = mkSub(subRaw, subLines);
+
+  // only a summary was given → show it as the title
+  if (!head && sub) return { head: mk(subRaw, subLines), sub: null };
+  return { head, sub };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -886,6 +212,7 @@ function wrapTokens(ctx, words, maxW) {
   return lines;
 }
 
+// Same number of lines as greedy wrapping, but with even line lengths
 function balancedWrap(ctx, words, maxW) {
   const first = wrapTokens(ctx, words, maxW);
   const n = first.length;
@@ -899,8 +226,10 @@ function balancedWrap(ctx, words, maxW) {
   return wrapTokens(ctx, words, hi);
 }
 
-function layoutBlock(ctx, block, size, maxW, maxLines) {
-  ctx.font = `${size}px ${HEAD_FONT}`;
+// Lays one block out at one font size.
+// Fixed lines (from the caller) are kept; otherwise it wraps by itself.
+function layoutBlock(ctx, block, size, font, maxW, maxLines) {
+  ctx.font = `${size}px ${font}`;
   let lines;
   if (block.lines) {
     lines = block.lines.map((t) => ({ t, w: ctx.measureText(t).width }));
@@ -915,265 +244,317 @@ function layoutBlock(ctx, block, size, maxW, maxLines) {
   return { lines, ok };
 }
 
-// Red block uses `size`, black block uses `subSize` (a bit smaller)
-function layoutPosterOnce(ctx, copy, availH) {
-
-  const attempt = (maxHeadLines) => {
-    for (let size = HEAD_MAX; size >= HEAD_MIN; size -= 2) {
-      const subSize = Math.max(HEAD_MIN, Math.round(size * SUB_RATIO));
-
-      const hb = layoutBlock(ctx, copy.head, size, HEAD_TARGET_W, maxHeadLines);
-      if (!hb.ok) continue;
-
-      let sb = null;
-      if (copy.sub) {
-        sb = layoutBlock(ctx, copy.sub, subSize, HEAD_TARGET_W, SUB_MAX_LINES);
-        if (!sb.ok) continue;
-      }
-
-      for (const f of HEAD_LH_TRY) {
-        const lh    = Math.round(size * f);
-        const subLh = Math.round(subSize * f);
-        const total = hb.lines.length * lh + (sb ? SUB_GAP + sb.lines.length * subLh : 0);
-        if (total <= availH) {
-          return {
-            size, lh, subSize, subLh,
-            headLines: hb.lines,
-            subLines:  sb ? sb.lines : null,
-            total,
-          };
-        }
-      }
-    }
-    return null;
-  };
-
-  const best = attempt(4) || attempt(HEAD_MAX_LINES);
-  if (best) return best;
-
-  const subSize = HEAD_MIN;
-  const hb = layoutBlock(ctx, copy.head, HEAD_MIN, HEAD_TARGET_W, 99);
-  const sb = copy.sub ? layoutBlock(ctx, copy.sub, subSize, HEAD_TARGET_W, 99) : null;
-  const f  = HEAD_LH_TRY[HEAD_LH_TRY.length - 1];
-  const lh = Math.round(HEAD_MIN * f);
-  return {
-    size: HEAD_MIN, lh, subSize, subLh: lh,
-    headLines: hb.lines,
-    subLines:  sb ? sb.lines : null,
-    total: hb.lines.length * lh + (sb ? SUB_GAP + sb.lines.length * lh : 0),
-  };
+// Biggest font size where the block fits the width, the line count AND the height
+function fitBlock(ctx, block, font, o) {
+  for (let size = o.max; size >= o.min; size -= 2) {
+    const r  = layoutBlock(ctx, block, size, font, o.maxW, o.maxLines);
+    const lh = Math.round(size * o.lh);
+    const total = r.lines.length * lh;
+    if (r.ok && total <= o.maxH) return { size, lh, lines: r.lines, total };
+  }
+  return null;
 }
 
-function layoutPoster(ctx, copy, availH) {
-  const hasHL = Boolean(copy.head && copy.head.lines);
-  const hasSL = Boolean(copy.sub && copy.sub.lines);
+function fitWithFallback(ctx, block, font, o) {
+  let res = fitBlock(ctx, block, font, o);
+  if (!res && block.lines) res = fitBlock(ctx, { text: block.text, lines: null }, font, o);
+  if (res) return res;
 
-  const base = layoutPosterOnce(ctx, copy, availH);
-  if (!hasHL && !hasSL) return base;
-
-  const variants = [];
-  if (hasHL) variants.push({ ...copy, head: { ...copy.head, lines: null } });
-  if (hasSL) variants.push({ ...copy, sub:  { ...copy.sub,  lines: null } });
-  if (hasHL && hasSL) {
-    variants.push({
-      head: { ...copy.head, lines: null },
-      sub:  { ...copy.sub,  lines: null },
-    });
-  }
-
-  let best = base;
-  for (const v of variants) {
-    const L = layoutPosterOnce(ctx, v, availH);
-    if (L.size > best.size) best = L;
-  }
-  return best.size >= base.size * 1.04 ? best : base;
+  // nothing fits (a very long text): smallest size, any number of lines
+  const r  = layoutBlock(ctx, { text: block.text, lines: null }, o.min, font, o.maxW, 99);
+  const lh = Math.round(o.min * o.lh);
+  return { size: o.min, lh, lines: r.lines, total: r.lines.length * lh };
 }
 
 // ═══════════════════════════════════════════════════════════════
-// TEXT DRAWING  (flat red + flat black, like the reference)
+// TEXT DRAWING
 // ═══════════════════════════════════════════════════════════════
 
-function strokeFill(ctx, text, x, y, lineWidth) {
+function strokeFill(ctx, text, x, y, fill, strokeColor, strokeW) {
   ctx.save();
-  if (lineWidth > 0.01) {
-    ctx.lineJoin    = "round";
-    ctx.miterLimit  = 2;
-    ctx.lineWidth   = lineWidth;
-    ctx.strokeStyle = ctx.fillStyle;
+  ctx.lineJoin   = "round";
+  ctx.miterLimit = 2;
+  if (strokeW > 0.01) {
+    ctx.lineWidth   = strokeW;
+    ctx.strokeStyle = strokeColor;
     ctx.strokeText(text, x, y);
   }
+  ctx.fillStyle = fill;
   ctx.fillText(text, x, y);
   ctx.restore();
 }
 
-function drawCopy(ctx, L, top) {
+// TITLE: light-yellow lines, the last line(s) white
+function drawTitle(ctx, L, top, whiteCount) {
   ctx.save();
   ctx.textAlign    = "center";
   ctx.textBaseline = "alphabetic";
+  ctx.font         = `${L.size}px ${HEAD_FONT}`;
 
-  // red headline (heavier)
-  ctx.font      = `${L.size}px ${HEAD_FONT}`;
-  ctx.fillStyle = COLOR_HEAD;
-  L.headLines.forEach((ln, i) => {
-    const y = top + i * L.lh + L.lh / 2 + L.size * 0.33;
-    strokeFill(ctx, ln.t, W / 2, y, L.size * HEAD_BOLD_W);
+  const thick = L.size * TITLE_STROKE;
+  const n     = L.lines.length;
+
+  L.lines.forEach((ln, i) => {
+    const color = i >= n - whiteCount ? WHITE : YELLOW;
+    const base  = top + i * L.lh + L.lh / 2 + L.size * 0.33;
+    strokeFill(ctx, ln.t, W / 2, base, color, color, thick);
   });
 
-  // black sub-headline (lighter)
-  if (L.subLines) {
-    const subTop = top + L.headLines.length * L.lh + SUB_GAP;
-    ctx.font      = `${L.subSize}px ${HEAD_FONT}`;
-    ctx.fillStyle = COLOR_SUB;
-    L.subLines.forEach((ln, j) => {
-      const y = subTop + j * L.subLh + L.subLh / 2 + L.subSize * 0.33;
-      strokeFill(ctx, ln.t, W / 2, y, L.subSize * SUB_BOLD_W);
-    });
+  ctx.restore();
+}
+
+// SUMMARY: first line(s) dark text on a light-yellow box, the rest white on black
+function drawSummary(ctx, L, top, highlightCount) {
+  ctx.save();
+  ctx.textAlign    = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.font         = `${L.size}px ${SUM_FONT}`;
+
+  const thick = L.size * SUM_STROKE;
+
+  L.lines.forEach((ln, i) => {
+    const cy   = top + i * L.lh + L.lh / 2;
+    const base = cy + L.size * 0.33;
+
+    if (i < highlightCount) {
+      const bw = Math.min(W - 24, ln.w + BOX_PAD_X * 2);
+      const bh = L.lh * 0.96;
+      ctx.fillStyle = YELLOW;
+      ctx.fillRect(Math.round((W - bw) / 2), Math.round(cy - bh / 2), Math.round(bw), Math.round(bh));
+      strokeFill(ctx, ln.t, W / 2, base, INK, INK, thick);
+    } else {
+      strokeFill(ctx, ln.t, W / 2, base, WHITE, WHITE, thick);
+    }
+  });
+
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PHOTO  –  full width under the title, fading into BLACK at the bottom
+//   newsItem.image   : one photo (url / path / buffer)
+//   newsItem.images  : up to 3 photos → collage
+//                      2 = side by side, 3 = 1 big left + 2 stacked right
+//   newsItem.showPhoto = false → no photo
+// ═══════════════════════════════════════════════════════════════
+
+function drawCover(ctx, img, x, y, w, h) {
+  const scale = Math.max(w / img.width, h / img.height);
+  const dw = img.width  * scale;
+  const dh = img.height * scale;
+  const dx = x + (w - dw) / 2;
+  const dy = y - Math.max(0, dh - h) * PHOTO_FOCUS_Y;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+  ctx.drawImage(img, dx, dy, dw, dh);
+  ctx.restore();
+}
+
+async function loadAll(sources) {
+  const out = [];
+  for (const s of sources) {
+    try {
+      out.push(await loadImage(s));
+    } catch (e) {
+      console.warn("[Poster] photo failed:", e.message);
+    }
   }
+  return out;
+}
+
+async function drawPhoto(ctx, sources, top, photoH) {
+  const imgs = await loadAll(sources.slice(0, 3));
+  if (!imgs.length) return false;
+
+  const g  = PHOTO_GAP;
+  const hw = Math.floor((W - g) / 2);
+  const hh = Math.floor((photoH - g) / 2);
+
+  if (imgs.length === 1) {
+    drawCover(ctx, imgs[0], 0, top, W, photoH);
+  } else if (imgs.length === 2) {
+    drawCover(ctx, imgs[0], 0,       top, hw,          photoH);
+    drawCover(ctx, imgs[1], hw + g,  top, W - hw - g,  photoH);
+  } else {
+    drawCover(ctx, imgs[0], 0,       top,          hw,          photoH);
+    drawCover(ctx, imgs[1], hw + g,  top,          W - hw - g,  hh);
+    drawCover(ctx, imgs[2], hw + g,  top + hh + g, W - hw - g,  photoH - hh - g);
+  }
+
+  // fade to black at the bottom
+  const fadeLen   = Math.min(PHOTO_FADE_MAX, Math.max(120, Math.round(photoH * PHOTO_FADE_FRAC)));
+  const fadeStart = top + photoH - fadeLen;
+  const fade = ctx.createLinearGradient(0, fadeStart, 0, top + photoH);
+  fade.addColorStop(0.00, "rgba(0,0,0,0)");
+  fade.addColorStop(0.30, "rgba(0,0,0,0.18)");
+  fade.addColorStop(0.55, "rgba(0,0,0,0.50)");
+  fade.addColorStop(0.80, "rgba(0,0,0,0.85)");
+  fade.addColorStop(1.00, "rgba(0,0,0,1)");
+  ctx.fillStyle = fade;
+  ctx.fillRect(0, fadeStart, W, top + photoH - fadeStart + 1);
+
+  return true;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FOOTER  –  brand logo / name on the left + dashed line to the right
+//   newsItem.logo       : logo image (url / path / buffer)  – used if given
+//   newsItem.brandName  : text brand (default: NEWSLINE24, or env BRAND_NAME)
+// ═══════════════════════════════════════════════════════════════
+
+async function drawFooter(ctx, newsItem) {
+  const cy = H - Math.round(FOOTER_H * 0.56);
+  let   endX = FOOTER_PAD_X;
+
+  let logo = null;
+  if (newsItem.logo) {
+    try { logo = await loadImage(newsItem.logo); }
+    catch (e) { console.warn("[Poster] logo failed:", e.message); }
+  }
+
+  if (logo) {
+    const lh = 56;
+    const lw = Math.min(320, Math.round((logo.width / logo.height) * lh));
+    const h2 = Math.round((logo.height / logo.width) * lw);
+    ctx.drawImage(logo, FOOTER_PAD_X, cy - h2 / 2, lw, h2);
+    endX = FOOTER_PAD_X + lw;
+  } else {
+    const name  = cleanText(newsItem.brandName || BRAND_NAME, true);
+    if (name) {
+      let first, rest, joiner = " ";
+      const parts = name.split(" ");
+      const m = parts.length === 1 && name.match(/^(\D+)(\d+)$/);
+      if (m) {                       // "NEWSLINE24" → NEWSLINE (yellow) + 24 (white)
+        first = m[1]; rest = m[2]; joiner = "";
+      } else {
+        first = parts[0];
+        rest  = parts.slice(1).join(" ");
+      }
+      const size  = 46;
+
+      ctx.save();
+      ctx.textAlign    = "left";
+      ctx.textBaseline = "alphabetic";
+      ctx.font         = `${size}px ${FOOT_FONT}`;
+      const base = cy + size * 0.33;
+
+      let x = FOOTER_PAD_X;
+      strokeFill(ctx, first, x, base, YELLOW, YELLOW, size * 0.03);
+      x += ctx.measureText(first).width;
+      if (rest) {
+        if (joiner) x += ctx.measureText(joiner).width;
+        strokeFill(ctx, rest, x, base, WHITE, WHITE, size * 0.03);
+        x += ctx.measureText(rest).width;
+      }
+      ctx.restore();
+      endX = x;
+    }
+  }
+
+  // dashed line
+  ctx.save();
+  ctx.strokeStyle = "#bdbdbd";
+  ctx.lineWidth   = 2;
+  ctx.setLineDash([7, 5]);
+  ctx.beginPath();
+  ctx.moveTo(endX + 18, cy);
+  ctx.lineTo(W - FOOTER_PAD_X, cy);
+  ctx.stroke();
   ctx.restore();
 }
 
 // ═══════════════════════════════════════════════════════════════
 // MAIN POSTER DRAW
+//
+//   newsItem options:
+//     title                 top title (light-yellow lines, last line white)
+//     summary               bottom summary (cut to SUM_MAX_WORDS + "...",
+//                           first line dark on a light-yellow box)
+//     caption               used as the summary when no summary/description is given
+//     summaryMaxWords       override the summary word limit for this post
+//     titleLines            force the title line breaks
+//     summaryLines          force the summary line breaks
+//     titleBlackLines       how many LAST title lines are white (default 1)
+//     summaryHighlightLines how many FIRST summary lines get the yellow box (default 1)
+//     uppercase   true      upper-case all text
+//     showPhoto   false     no photo
+//     image / images        photo(s): url / path / buffer (images = collage, max 3)
+//     logo / brandName      footer brand
 // ═══════════════════════════════════════════════════════════════
 
 async function createNewsPoster(newsItem) {
 
-  // Normalise the photo input once, so the director and the poster see the same thing
-  const photos = getPhotoSources(newsItem);
-  if (photos.length) {
-    newsItem = { ...newsItem, images: photos, image: photos[0] };
-  } else if (newsItem.showPhoto !== false) {
-    console.warn("[Poster] no photo supplied (newsItem.image / newsItem.images is empty)");
-  }
-
-  // ── AI director: red / black split, line breaks, photo focus ──
-  const direction = await askDirector(newsItem);
-
-  if (direction && direction.shortTitle) {
-    console.log("[Poster] long title shortened by AI:", direction.shortTitle);
-    newsItem = { ...newsItem, title: direction.shortTitle };
-  }
-
-  if (direction && direction.headLines) {
-    newsItem = {
-      ...newsItem,
-      aiLayout: { headLines: direction.headLines, subLines: direction.subLines || [] },
-    };
-  }
-
-  // ── Ad pipeline (unchanged) ─────────────────────────────────
-  const hasAdUrl  = Boolean(newsItem.adBannerUrl);
-  const isVideoAd = newsItem.adResourceType === "video";
-  let   adImg     = null;
-  let   actualAdH = DEFAULT_AD_H;
-  let   liveAdVideoUrl = null;
-
-  if (hasAdUrl && !isVideoAd) {
-    try {
-      console.log("[Ad] Loading image banner:", newsItem.adBannerUrl);
-      const jpegBuf = await fetchAsJpegBuffer(newsItem.adBannerUrl);
-      adImg         = await loadImage(jpegBuf);
-      actualAdH     = computeAdHeight(adImg);
-      console.log(`[Ad] Image banner loaded: ${adImg.width}x${adImg.height}px, strip: ${actualAdH}px`);
-    } catch (err) {
-      console.error("[Ad] Image banner load failed:", err.message);
-    }
-  }
-
-  if (!adImg && hasAdUrl && isVideoAd) {
-    let tmpVidPath = null;
-    try {
-      console.log("[Ad] Probing video banner dimensions:", newsItem.adBannerUrl);
-      tmpVidPath     = path.join(os.tmpdir(), `ad_video_${Date.now()}.mp4`);
-      const vidBuf   = await fetchBuffer(newsItem.adBannerUrl);
-      fs.writeFileSync(tmpVidPath, vidBuf);
-
-      const frameBuf = await extractVideoFrame(tmpVidPath, 1);
-      if (frameBuf) {
-        const probeImg = await loadImage(frameBuf);
-        actualAdH      = computeAdHeight(probeImg);
-        console.log(`[Ad] Video banner probed: ${probeImg.width}x${probeImg.height}px, strip: ${actualAdH}px`);
-      } else {
-        console.warn("[Ad] Video banner probe returned null — using default height");
-      }
-      liveAdVideoUrl = newsItem.adBannerUrl;
-    } catch (err) {
-      console.error("[Ad] Video banner probe failed:", err.message);
-      liveAdVideoUrl = newsItem.adBannerUrl;
-    } finally {
-      if (tmpVidPath) {
-        try { fs.unlinkSync(tmpVidPath); } catch { /* ignore */ }
-      }
-    }
-  }
-
-  if (!adImg && !liveAdVideoUrl) {
-    console.log("[Ad] Using local video fallback (live composite):", FALLBACK_VIDEO_PATH);
-    try {
-      const frameBuf = await extractVideoFrame(FALLBACK_VIDEO_PATH, 1);
-      if (frameBuf) {
-        const probeImg = await loadImage(frameBuf);
-        actualAdH      = computeAdHeight(probeImg);
-        console.log(`[Ad] Local fallback probed: ${probeImg.width}x${probeImg.height}px, strip: ${actualAdH}px`);
-      } else {
-        console.warn("[Ad] Local fallback probe returned null — using default height");
-        actualAdH = DEFAULT_AD_H;
-      }
-      liveAdVideoUrl = FALLBACK_VIDEO_PATH;
-    } catch (err) {
-      console.error("[Ad] Local fallback error:", err.message);
-      actualAdH = DEFAULT_AD_H;
-    }
-  }
-
-  const canvasH = liveAdVideoUrl ? H : H + actualAdH;
-  console.log(`[Canvas] poster=${H}px  adStrip=${actualAdH}px  liveVideoAd=${!!liveAdVideoUrl}  canvasH=${canvasH}px`);
-
-  const canvas = createCanvas(W, canvasH);
+  const canvas = createCanvas(W, H);
   const ctx    = canvas.getContext("2d");
 
-  // ── 1. Measure the headline ─────────────────────────────────
-  const copy   = buildCopy(newsItem);
-  let layout   = null;
-  let startY   = TEXT_TOP;
-  const availH = TEXT_BOTTOM - TEXT_TOP;
+  // ── 1. Black background ─────────────────────────────────────
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, W, H);
 
+  // ── 2. Measure: title (top) and summary (bottom) ────────────
+  const copy = buildCopy(newsItem);
+
+  let titleL = null;
+  let titleBottom = 0;
   if (copy.head) {
-    layout = layoutPoster(ctx, copy, availH);
-    startY = Math.round(TEXT_TOP + Math.max(0, availH - layout.total) * 0.35);
+    titleL = fitWithFallback(ctx, copy.head, HEAD_FONT, {
+      max: TITLE_MAX, min: TITLE_MIN, lh: TITLE_LH,
+      maxW: TITLE_MAX_W, maxLines: TITLE_MAX_LINES, maxH: TITLE_MAX_H,
+    });
+    titleBottom = TITLE_PAD_TOP + titleL.total + TITLE_PAD_BOTTOM;
   }
 
-  // ── 2. White background ─────────────────────────────────────
-  ctx.fillStyle = COLOR_BG;
-  ctx.fillRect(0, 0, W, canvasH);
-
-  // ── 3. Rounded photo box + date ─────────────────────────────
-  const photoSources = getPhotoSources(newsItem);
-  if (photoSources.length || newsItem.showPhoto !== false) {
-    await drawPhotos(ctx, photoSources, direction && direction.focus);
-  }
-  drawDate(ctx, newsItem);
-
-  // ── 4. Headline (red) + sub-headline (black) ────────────────
-  if (layout) drawCopy(ctx, layout, startY);
-
-  // ── 5. Channel bar (flashkeralam), then logo on top of it ───
-  if (newsItem.showFooter !== false) {
-    drawSiteBar(ctx, newsItem);
-    await drawLogo(ctx, newsItem);
+  const contentBottom = H - FOOTER_H;
+  let sumL   = null;
+  let sumTop = contentBottom;
+  if (copy.sub) {
+    const availH = contentBottom - titleBottom - PHOTO_MIN_H;
+    sumL = fitWithFallback(ctx, copy.sub, SUM_FONT, {
+      max: SUM_MAX, min: SUM_MIN, lh: SUM_LH,
+      maxW: SUM_MAX_W, maxLines: SUM_MAX_LINES, maxH: Math.max(availH, SUM_MIN * SUM_LH),
+    });
+    sumTop = contentBottom - sumL.total;
   }
 
-  // ── 6. Reset ────────────────────────────────────────────────
+  // ── 3. Photo(s) between the title and the summary ───────────
+  const photoTop = titleBottom;
+  const photoEnd = sumL ? sumTop + PHOTO_OVERLAP : contentBottom;
+  const photoH   = Math.max(100, photoEnd - photoTop);
+
+  const sources = [];
+  if (Array.isArray(newsItem.images)) sources.push(...newsItem.images.filter(Boolean));
+  else if (newsItem.image) sources.push(newsItem.image);
+  if (!sources.length && newsItem.image) sources.push(newsItem.image);
+
+  if (newsItem.showPhoto !== false && sources.length) {
+    await drawPhoto(ctx, sources, photoTop, photoH);
+  }
+
+  // ── 4. Title, summary, footer ───────────────────────────────
+  if (titleL) {
+    const whiteCount = titleL.lines.length > 1
+      ? Math.min(Number.isInteger(newsItem.titleBlackLines) ? newsItem.titleBlackLines : 1, titleL.lines.length - 1)
+      : 0;
+    drawTitle(ctx, titleL, TITLE_PAD_TOP, whiteCount);
+  }
+
+  if (sumL) {
+    const hl = Number.isInteger(newsItem.summaryHighlightLines) ? newsItem.summaryHighlightLines : 1;
+    drawSummary(ctx, sumL, sumTop, hl);
+  }
+
+  await drawFooter(ctx, newsItem);
+
+  // ── 5. Reset ────────────────────────────────────────────────
   ctx.textAlign    = "left";
   ctx.textBaseline = "alphabetic";
 
-  // ── 7. Ad strip ─────────────────────────────────────────────
-  if (!liveAdVideoUrl) {
-    drawAdStrip(ctx, adImg, H, actualAdH);
-  }
-
   const buffer = await canvasToBuffer(canvas, "image/png");
-  return { type: "image", buffer, liveAdVideoUrl, adH: actualAdH };
+  // no ad strip any more: liveAdVideoUrl is always null, adH is 0
+  return { type: "image", buffer, liveAdVideoUrl: null, adH: 0 };
 }
 
 module.exports = { createNewsPoster, toNodeBuffer };
