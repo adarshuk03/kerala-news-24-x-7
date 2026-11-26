@@ -2,74 +2,123 @@ const { createCanvas, GlobalFonts, loadImage } = require("@napi-rs/canvas");
 const path  = require("path");
 const fs    = require("fs");
 
-// ── Font ──────────────────────────────────────────────────────
-// ONLY ONE font is used everywhere (title, footer):
-//   server/fonts/AnekMalayalam_SemiCondensed-Bold.ttf
-const FONT_FILE = path.join(__dirname, "../fonts/AnekMalayalam_SemiCondensed-Bold.ttf");
-
-if (fs.existsSync(FONT_FILE)) {
-  GlobalFonts.registerFromPath(FONT_FILE, "Malayalam");
-  console.log("[Fonts] using", path.basename(FONT_FILE));
+// ── Fonts ─────────────────────────────────────────────────────
+const LATIN_FONT_FILE = path.join(__dirname, "../fonts/Poppins-Bold.ttf");
+if (fs.existsSync(LATIN_FONT_FILE)) {
+  GlobalFonts.registerFromPath(LATIN_FONT_FILE, "English");
 } else {
-  console.error("❌ AnekMalayalam_SemiCondensed-Bold.ttf not found in server/fonts");
+  console.warn("[Fonts] Poppins-Bold.ttf not found in server/fonts");
 }
 
-const HEAD_FONT = "Malayalam";
-const FOOT_FONT = "Malayalam";
+// MALAYALAM font (must contain Malayalam glyphs – Poppins does NOT).
+const MALAYALAM_CANDIDATES = [
+  "NotoSansMalayalam-Bold.ttf",
+  "NotoSansMalayalam-Bold.otf",
+  "AnekMalayalam-Bold.ttf",
+  "AnekMalayalam_SemiCondensed-Bold.ttf",
+  "Manjari-Bold.ttf",
+  "NotoSansMalayalam-Black.ttf",
+  "Meera-Regular.ttf",
+  "Rachana-Regular.ttf",
+].map((f) => path.join(__dirname, "../fonts", f));
 
-// Poster size.
-//   Width is fixed. Height is BASE_H by default, but with ONE photo the
-//   poster height adapts to the photo so the WHOLE photo is visible
-//   (clamped between H_MIN and H_MAX).
-const W      = 1080;
-const BASE_H = 1620;
-const H_MIN  = 1080;   // 1:1
-const H_MAX  = 1920;   // 9:16
+let hasMalayalam = false;
+for (const p of MALAYALAM_CANDIDATES) {
+  try {
+    if (fs.existsSync(p)) {
+      GlobalFonts.registerFromPath(p, "Malayalam");
+      hasMalayalam = true;
+      console.log("[Fonts] Malayalam font:", path.basename(p));
+      break;
+    }
+  } catch (e) {
+    console.warn("[Fonts] could not load", p, e.message);
+  }
+}
+if (!hasMalayalam) {
+  console.error("❌ no Malayalam font found in server/fonts – Malayalam text will not render correctly");
+  if (fs.existsSync(LATIN_FONT_FILE)) GlobalFonts.registerFromPath(LATIN_FONT_FILE, "Malayalam");
+}
+
+// Optional HEAVY font for the thick headline look of the reference poster.
+const HEAVY_CANDIDATES = [
+  "AnekMalayalam_SemiCondensed-ExtraBold.ttf",
+  "AnekMalayalam-ExtraBold.ttf",
+  "AnekMalayalam_Condensed-ExtraBold.ttf",
+  "Manjari-Bold.ttf",
+  "NotoSansMalayalam-Black.ttf",
+].map((f) => path.join(__dirname, "../fonts", f));
+
+let hasHeavy = false;
+for (const p of HEAVY_CANDIDATES) {
+  try {
+    if (fs.existsSync(p)) {
+      GlobalFonts.registerFromPath(p, "MalayalamHeavy");
+      hasHeavy = true;
+      console.log("[Fonts] heavy headline font:", path.basename(p));
+      break;
+    }
+  } catch (e) {
+    console.warn("[Fonts] could not load", p, e.message);
+  }
+}
+
+const HEAD_FONT = hasHeavy ? "MalayalamHeavy, Malayalam, English" : "Malayalam, English";
 
 // ═══════════════════════════════════════════════════════════════
-// DESIGN CONSTANTS
+// POSTER SIZE  (3:4)
+// ═══════════════════════════════════════════════════════════════
+const W = 1080;
+const H = 1440;
+
+// ═══════════════════════════════════════════════════════════════
+// DESIGN CONSTANTS  (UPSIDE-DOWN layout, FULL photo visible)
 //
-//   top        TITLE  – centred, bold, ALTERNATING font sizes:
-//                       line 1 BIG, line 2 small, line 3 BIG, line 4 small ...
-//                       light-yellow lines, LAST line white
-//   middle     PHOTO  – full width, shown COMPLETELY (no zoom / no crop),
-//                       short black gradient at the top
-//                       (several images → collage)
-//   footer     brand name on the left + dashed line to the right
-//   background plain black
+//   whole poster   BLACK background
+//   top            TITLE (white lines first, yellow lines last),
+//                  auto-fitted + centered in the free area
+//   middle         credit line: social icons + channel name
+//   bottom         PHOTO – the WHOLE image is shown (no cropping),
+//                  short black fade at its top edge
+//   bottom-right   optional round photos with RED border
 // ═══════════════════════════════════════════════════════════════
 
-const BG     = "#000000";   // background
-const YELLOW = "#fff59d";   // light yellow
-const WHITE  = "#ffffff";   // white
+const BLACK  = "#000000";
+const WHITE  = "#ffffff";
+const YELLOW = "#ffcb05";
+const RED    = "#d4101a";
 
-// Title (at the top)
-const TITLE_PAD_TOP     = 30;
-const TITLE_PAD_BOTTOM  = 22;
-const TITLE_MAX_W       = Math.round(W * 0.96);      // wider text area
-const TITLE_MAX         = 132;                       // BIG line max size (was 96)
-const TITLE_MIN         = 60;                        // BIG line min size (was 44)
-const TITLE_SMALL_RATIO = 0.74;                      // small line = 74% of the big line (was 0.68)
-const TITLE_LH          = 1.18;                      // slightly tighter line spacing
-const TITLE_MAX_LINES   = 5;
-const TITLE_MAX_H       = Math.round(BASE_H * 0.44); // taller title block allowed (was 0.34)
+// Photo area (bottom). Height follows the photo's own shape, within these limits.
+const PHOTO_MIN_FRAC  = 0.36;    // smallest photo area (fraction of H)
+const PHOTO_MAX_FRAC  = 0.56;    // biggest photo area (fraction of H)
+const COLLAGE_FRAC    = 0.50;    // photo area height in collage mode
+const PHOTO_FADE_FRAC = 0.06;    // short black fade at the TOP edge of the photo
+const PHOTO_GAP       = 4;       // collage mode only
 
-// Photo
-const PHOTO_MIN_H        = Math.round(BASE_H * 0.40); // photo area is never smaller than this
-const PHOTO_OVERLAP      = 40;                        // (cover mode) photo starts this far behind the title
-const PHOTO_FADE_FRAC    = 0.30;                      // (cover mode) top fade = 30% of photo height
-const PHOTO_FADE_MAX     = 340;                       // (cover mode) fade never longer than this (px)
-const PHOTO_FADE_CONTAIN = 70;                        // (fit mode)   short fade so the photo stays visible
-const PHOTO_GAP          = 4;                         // black gap between collage images
-const PHOTO_FOCUS_Y      = 0.2;                       // (cover mode) 0 = keep top, 1 = keep bottom
+// Round insets (bottom right, over the photo)
+const CIRCLE_BORDER = 7;
+const CIRCLE_1_R    = 0.12;      // × W
+const CIRCLE_2_R    = 0.085;     // × W
+const CIRCLE_MARGIN = 28;
 
-// Footer
-const FOOTER_H      = 100;                           // space reserved at the bottom
-const FOOTER_PAD_X  = 28;
-const BRAND_NAME    = process.env.BRAND_NAME || "KERALA NEWS 24 X 7";
+// Credit line (icons + name) sits in a band between title and photo
+const CREDIT_BAND = 84;
+const CREDIT_ICON = 40;
+const CREDIT_SIZE = 34;
 
-// Text thickness (a single semi-condensed bold font, so thicken it slightly)
-const TITLE_STROKE = 0.03;
+// Title block (top)
+const TEXT_TOP_PAD    = Math.round(H * 0.035);
+const TEXT_GAP        = 10;      // space between title and credit band
+const TEXT_MAX_W      = Math.round(W * 0.94);
+const TEXT_MAX        = 84;      // biggest base font size tried
+const TEXT_MIN        = 40;      // smallest base font size
+const LINE_MAX        = 104;     // no single line is bigger than this
+const LINE_GROW       = 1.22;    // a line may grow to base * this to fill the width
+const TEXT_LH         = 1.2;
+const TEXT_MAX_LINES  = 9;
+const WHITE_FRACTION  = 0.45;    // first 45% of the lines are white, rest yellow
+
+const BRAND_NAME = process.env.BRAND_NAME || "KERALA NEWS 24 X 7";
 
 // ═══════════════════════════════════════════════════════════════
 // HELPERS
@@ -87,16 +136,23 @@ async function canvasToBuffer(canvas, mime = "image/png") {
   return Buffer.isBuffer(result) ? result : toNodeBuffer(await result);
 }
 
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+function rrect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y,     x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x,     y + h, r);
+  ctx.arcTo(x,     y + h, x,     y,     r);
+  ctx.arcTo(x,     y,     x + w, y,     r);
+  ctx.closePath();
+}
 
 // ═══════════════════════════════════════════════════════════════
-// TEXT CLEANING  –  only the TITLE is shown (no summary)
+// TEXT CLEANING  –  TITLE ONLY
 //
-//   newsItem.title                  → top title
-//        (fallbacks: summary, subtitle, description, caption)
-//   newsItem.title = "a | b"        → parts are joined into one title
-//   newsItem.titleLines             forces the line breaks
-//   newsItem.uppercase = true       upper-case everything (English posts)
+//   newsItem.title          the headline
+//   newsItem.titleLines     force the line breaks (array of strings)
+//   newsItem.titleWhiteLines  how many lines are white (rest yellow)
+//   newsItem.uppercase      upper-case everything (English posts)
 // ═══════════════════════════════════════════════════════════════
 
 function cleanText(s, upper) {
@@ -106,265 +162,166 @@ function cleanText(s, upper) {
 
 const wordsOf = (s) => String(s).split(" ").filter(Boolean);
 
-function joinLines(v) {
-  return Array.isArray(v)
-    ? v.map((l) => (typeof l === "string" ? l : l && l.text)).filter(Boolean).join(" ")
-    : String(v ?? "");
-}
-
-function linesOf(v, c) {
-  if (!Array.isArray(v)) return null;
-  const out = v.map((l) => c(typeof l === "string" ? l : l && l.text)).filter(Boolean);
-  return out.length ? out : null;
-}
-
-// → { text, lines|null } | null
 function buildTitle(newsItem) {
   const up = newsItem.uppercase === true;
   const c  = (s) => cleanText(s, up);
 
-  let raw   = joinLines(newsItem.titleLines) || String(newsItem.title || "");
-  let lines = linesOf(newsItem.titleLines, c);
-
-  if (!c(raw)) {
-    raw =
-      joinLines(newsItem.summaryLines) ||
-      String(newsItem.summary || "") ||
-      joinLines(newsItem.subTitleLines) ||
-      String(newsItem.subtitle || "") ||
-      String(newsItem.description || "") ||
-      String(newsItem.caption || "");
-    lines = linesOf(newsItem.summaryLines || newsItem.subTitleLines, c);
+  let lines = null;
+  if (Array.isArray(newsItem.titleLines)) {
+    const l = newsItem.titleLines
+      .map((x) => c(typeof x === "string" ? x : x && x.text))
+      .filter(Boolean);
+    if (l.length) lines = l;
   }
 
-  if (raw.includes("|")) {
-    raw = raw.split("|").map(c).filter(Boolean).join(" ");
-    lines = null;
-  }
-
-  const text = c(raw);
+  const text = lines ? lines.join(" ") : c(newsItem.title);
   if (!text) return null;
-  return { text, lines: lines && lines.length ? lines : null };
+  return { text, lines };
 }
 
 // ═══════════════════════════════════════════════════════════════
-// LINE WRAPPING + FITTING  (alternating BIG / small lines)
+// LINE WRAPPING + PER-LINE FITTING
 // ═══════════════════════════════════════════════════════════════
 
-const sizeForLine = (i, big, small) => (i % 2 === 0 ? big : small);
-
-function measureAt(ctx, text, size, font) {
-  ctx.font = `${size}px ${font}`;
-  return ctx.measureText(text).width;
-}
-
-// Greedy wrap where line 0 uses the big font, line 1 the small font, ...
-function wrapAlt(ctx, words, maxW, big, small, font) {
+function wrapTokens(ctx, words, maxW) {
+  const space = ctx.measureText(" ").width;
   const lines = [];
   let cur = [];
+  let curW = 0;
   for (const w of words) {
-    const idx  = lines.length;
-    const size = sizeForLine(idx, big, small);
-    const test = cur.concat(w).join(" ");
-    if (cur.length && measureAt(ctx, test, size, font) > maxW) {
-      const t = cur.join(" ");
-      lines.push({ t, w: measureAt(ctx, t, size, font), size });
-      cur = [w];
+    const ww = ctx.measureText(w.t).width;
+    const add = cur.length ? space + ww : ww;
+    if (cur.length && curW + add > maxW) {
+      lines.push({ words: cur, width: curW });
+      cur = [{ ...w, w: ww }];
+      curW = ww;
     } else {
-      cur.push(w);
+      cur.push({ ...w, w: ww });
+      curW += add;
     }
   }
-  if (cur.length) {
-    const idx  = lines.length;
-    const size = sizeForLine(idx, big, small);
-    const t = cur.join(" ");
-    lines.push({ t, w: measureAt(ctx, t, size, font), size });
-  }
+  if (cur.length) lines.push({ words: cur, width: curW });
   return lines;
 }
 
-// Same number of lines as greedy wrapping, but with more even line lengths
-function balancedWrapAlt(ctx, words, maxW, big, small, font) {
-  const first = wrapAlt(ctx, words, maxW, big, small, font);
+// Same number of lines as greedy wrapping, but with even line lengths
+function balancedWrap(ctx, words, maxW) {
+  const first = wrapTokens(ctx, words, maxW);
   const n = first.length;
   if (n < 2) return first;
 
   let lo = maxW * 0.45, hi = maxW;
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 14; i++) {
     const mid = (lo + hi) / 2;
-    if (wrapAlt(ctx, words, mid, big, small, font).length <= n) hi = mid; else lo = mid;
+    if (wrapTokens(ctx, words, mid).length <= n) hi = mid; else lo = mid;
   }
-  return wrapAlt(ctx, words, hi, big, small, font);
+  return wrapTokens(ctx, words, hi);
 }
 
-function layoutAt(ctx, block, big, small, font, maxW, maxLines) {
-  let lines;
-  if (block.lines) {
-    lines = block.lines.map((t, i) => {
-      const size = sizeForLine(i, big, small);
-      return { t, w: measureAt(ctx, t, size, font), size };
-    });
+// One title at one base size → lines, each with its OWN size
+function layoutTitle(ctx, title, base, forced) {
+  const out = [];
+  let ok = true;
+
+  let texts;
+  if (forced && title.lines) {
+    texts = title.lines;
   } else {
-    lines = balancedWrapAlt(ctx, wordsOf(block.text), maxW, big, small, font);
+    ctx.font = `${base}px ${HEAD_FONT}`;
+    const toks = wordsOf(title.text).map((t) => ({ t }));
+    texts = balancedWrap(ctx, toks, TEXT_MAX_W).map((l) => l.words.map((w) => w.t).join(" "));
   }
-  const ok = lines.length <= maxLines && lines.every((l) => l.w <= maxW + 1);
-  return { lines, ok };
-}
 
-const totalHeight = (lines) => lines.reduce((s, l) => s + Math.round(l.size * TITLE_LH), 0);
-
-function fitTitle(ctx, block, font, o) {
-  for (let big = o.max; big >= o.min; big -= 2) {
-    const small = Math.round(big * TITLE_SMALL_RATIO);
-    const r = layoutAt(ctx, block, big, small, font, o.maxW, o.maxLines);
-    const total = totalHeight(r.lines);
-    if (r.ok && total <= o.maxH) return { lines: r.lines, total, big, small };
+  for (const t of texts) {
+    ctx.font = `100px ${HEAD_FONT}`;
+    const w100    = Math.max(1, ctx.measureText(t).width);
+    const fitSize = Math.floor((100 * TEXT_MAX_W) / w100);
+    const size    = Math.min(Math.round(base * LINE_GROW), fitSize, LINE_MAX);
+    if (size < TEXT_MIN * 0.9) ok = false;
+    out.push({ t, size, lh: Math.round(size * TEXT_LH) });
   }
-  return null;
+
+  const total = out.reduce((s, l) => s + l.lh, 0);
+  return { lines: out, ok, total };
 }
 
-function fitWithFallback(ctx, block, font, o) {
-  let res = fitTitle(ctx, block, font, o);
-  if (!res && block.lines) res = fitTitle(ctx, { text: block.text, lines: null }, font, o);
-  if (res) return res;
-
-  // nothing fits (a very long text): smallest size, any number of lines
-  const small = Math.round(o.min * TITLE_SMALL_RATIO);
-  const r = layoutAt(ctx, { text: block.text, lines: null }, o.min, small, font, o.maxW, 99);
-  return { lines: r.lines, total: totalHeight(r.lines), big: o.min, small };
+// Biggest base size where the title fits the free area
+function fitTitle(ctx, title, availH) {
+  for (let S = TEXT_MAX; S >= TEXT_MIN; S -= 2) {
+    for (const forced of [true, false]) {
+      if (forced && !title.lines) continue;
+      const r = layoutTitle(ctx, title, S, forced);
+      if (r.ok && r.lines.length <= TEXT_MAX_LINES && r.total <= availH) return r;
+    }
+  }
+  // very long title: shrink every line until the block fits the area
+  const r = layoutTitle(ctx, title, TEXT_MIN, false);
+  if (r.total > availH && r.total > 0) {
+    const k = availH / r.total;
+    r.lines = r.lines.map((l) => ({
+      t: l.t,
+      size: Math.max(20, Math.floor(l.size * k)),
+      lh: Math.floor(l.lh * k),
+    }));
+    r.total = r.lines.reduce((s, l) => s + l.lh, 0);
+  }
+  return r;
 }
-
-// Gold title look (like the "സ്വർണം!" reference)
-const GOLD_STOPS = [
-  [0.00, "#fff27a"],   // bright yellow top
-  [0.35, "#ffd51a"],   // golden yellow
-  [0.70, "#f7a800"],   // orange-gold
-  [1.00, "#ffc61a"],   // warm yellow at the bottom
-];
-const OUTLINE_COLOR = "#0b1a3a";   // dark navy outline
-const OUTLINE_W     = 0.13;        // outline thickness (× font size)
-const SHINE_ALPHA   = 0.38;        // glossy highlight strength
 
 // ═══════════════════════════════════════════════════════════════
-// TEXT DRAWING
+// TEXT DRAWING  –  first lines white, last lines yellow
 // ═══════════════════════════════════════════════════════════════
 
-function strokeFill(ctx, text, x, y, fill, strokeColor, strokeW) {
-  ctx.save();
-  ctx.lineJoin   = "round";
-  ctx.miterLimit = 2;
-  if (strokeW > 0.01) {
-    ctx.lineWidth   = strokeW;
-    ctx.strokeStyle = strokeColor;
-    ctx.strokeText(text, x, y);
-  }
-  ctx.fillStyle = fill;
-  ctx.fillText(text, x, y);
-  ctx.restore();
-}
-
-// TITLE: gold letters with a thick navy outline and a glossy shine.
-// Big / small lines alternate. The last line(s) can be white (titleBlackLines).
-function drawTitle(ctx, L, top, whiteCount) {
+function drawTitle(ctx, lines, top, whiteCount) {
   ctx.save();
   ctx.textAlign    = "center";
   ctx.textBaseline = "alphabetic";
+  ctx.lineJoin     = "round";
+  ctx.miterLimit   = 2;
 
-  const n = L.lines.length;
   let y = top;
+  lines.forEach((ln, i) => {
+    const color = i < whiteCount ? WHITE : YELLOW;
 
-  L.lines.forEach((ln, i) => {
-    const lh    = Math.round(ln.size * TITLE_LH);
-    const base  = y + lh / 2 + ln.size * 0.33;
-    const white = i >= n - whiteCount;
     ctx.font = `${ln.size}px ${HEAD_FONT}`;
+    const base  = y + ln.lh / 2 + ln.size * 0.33;
+    const thick = hasHeavy ? 0 : ln.size * 0.025;
 
-    // 1) thick navy outline with a soft shadow, drawn on the poster
-    ctx.save();
-    ctx.lineJoin    = "round";
-    ctx.miterLimit  = 2;
-    ctx.lineWidth   = ln.size * OUTLINE_W;
-    ctx.strokeStyle = OUTLINE_COLOR;
-    ctx.shadowColor   = "rgba(0,0,0,0.65)";
-    ctx.shadowBlur    = 12;
-    ctx.shadowOffsetY = 5;
-    ctx.strokeText(ln.t, W / 2, base);
-    ctx.restore();
+    ctx.shadowColor   = "rgba(0,0,0,0.55)";
+    ctx.shadowBlur    = 8;
+    ctx.shadowOffsetY = 2;
 
-    // 2) the fill (gold or white) is drawn on a small scratch canvas,
-    //    so the shine only touches the letters
-    const pad  = Math.ceil(ln.size * 0.35);
-    const tmpH = lh + pad * 2;
-    const tmp  = createCanvas(W, tmpH);
-    const t    = tmp.getContext("2d");
-    const tb   = pad + (base - y);           // baseline inside the scratch canvas
-    const gTop = tb - ln.size * 0.95;
-    const gBot = tb + ln.size * 0.25;
-
-    t.textAlign    = "center";
-    t.textBaseline = "alphabetic";
-    t.font         = `${ln.size}px ${HEAD_FONT}`;
-    t.lineJoin     = "round";
-
-    let fill;
-    if (white) {
-      fill = WHITE;
-    } else {
-      fill = t.createLinearGradient(0, gTop, 0, gBot);
-      GOLD_STOPS.forEach(([p, c]) => fill.addColorStop(p, c));
+    if (thick > 0.01) {
+      ctx.lineWidth   = thick;
+      ctx.strokeStyle = color;
+      ctx.strokeText(ln.t, W / 2, base);
     }
+    ctx.fillStyle = color;
+    ctx.fillText(ln.t, W / 2, base);
 
-    t.fillStyle   = fill;
-    t.strokeStyle = fill;
-    t.lineWidth   = ln.size * 0.02;          // slightly bolder letters
-    t.strokeText(ln.t, W / 2, tb);
-    t.fillText(ln.t, W / 2, tb);
-
-    if (!white) {
-      t.globalCompositeOperation = "source-atop";   // only on the letters
-
-      // glossy light on the upper half
-      const gloss = t.createLinearGradient(0, gTop, 0, tb - ln.size * 0.25);
-      gloss.addColorStop(0, `rgba(255,255,255,${SHINE_ALPHA})`);
-      gloss.addColorStop(1, "rgba(255,255,255,0)");
-      t.fillStyle = gloss;
-      t.fillRect(0, gTop, W, tb - ln.size * 0.25 - gTop);
-
-      // diagonal sheen streak across the line
-      const x0 = W / 2 - ln.w / 2;
-      const sheen = t.createLinearGradient(x0, gTop, x0 + ln.w, gBot);
-      sheen.addColorStop(0.00, "rgba(255,255,255,0)");
-      sheen.addColorStop(0.42, "rgba(255,255,255,0)");
-      sheen.addColorStop(0.50, `rgba(255,255,255,${SHINE_ALPHA})`);
-      sheen.addColorStop(0.58, "rgba(255,255,255,0)");
-      sheen.addColorStop(1.00, "rgba(255,255,255,0)");
-      t.fillStyle = sheen;
-      t.fillRect(0, gTop, W, gBot - gTop);
-    }
-
-    ctx.drawImage(tmp, 0, y - pad);
-    y += lh;
+    y += ln.lh;
   });
 
   ctx.restore();
 }
+
 // ═══════════════════════════════════════════════════════════════
-// PHOTO  –  full width under the title
-//   newsItem.image    : one photo (url / path / buffer)
-//   newsItem.images   : up to 3 photos → collage
-//                       2 = side by side, 3 = 1 big left + 2 stacked right
-//   newsItem.showPhoto = false     → no photo
-//   newsItem.photoFit  = "cover"   → old behaviour: zoom to fill (crops the photo)
-//                        "contain" → (default) whole photo visible, nothing cropped
+// PHOTO  –  bottom of the poster, WHOLE image visible (contain-fit)
+//   newsItem.image    : main photo (url / path / buffer)
+//   newsItem.images   : [main, circle1, circle2]  → the 2nd and 3rd go into the
+//                       round red-bordered insets (bottom right)
+//   newsItem.circles  : [circle1, circle2]  explicit round photos
+//   newsItem.collage = true → images are drawn as a collage (cropped cells)
+//   newsItem.showPhoto = false → no photo
 // ═══════════════════════════════════════════════════════════════
 
-// zoom to fill the box (crops)
-function drawCover(ctx, img, x, y, w, h) {
+// cover-crop (used for collage cells and circles)
+function drawCover(ctx, img, x, y, w, h, focusY = 0.08) {
   const scale = Math.max(w / img.width, h / img.height);
   const dw = img.width  * scale;
   const dh = img.height * scale;
   const dx = x + (w - dw) / 2;
-  const dy = y - Math.max(0, dh - h) * PHOTO_FOCUS_Y;
+  const dy = y - Math.max(0, dh - h) * focusY;
 
   ctx.save();
   ctx.beginPath();
@@ -372,18 +329,25 @@ function drawCover(ctx, img, x, y, w, h) {
   ctx.clip();
   ctx.drawImage(img, dx, dy, dw, dh);
   ctx.restore();
-  return { x, y, w, h };
 }
 
-// whole photo visible, centred inside the box (no crop)
+// contain-fit: the whole image is visible, centered, never cropped
 function drawContain(ctx, img, x, y, w, h) {
   const scale = Math.min(w / img.width, h / img.height);
   const dw = img.width  * scale;
   const dh = img.height * scale;
   const dx = x + (w - dw) / 2;
   const dy = y + (h - dh) / 2;
+
+  // gaps (if any) get a dark, dimmed copy of the same photo – no ugly empty bars
+  if (dw < w - 1 || dh < h - 1) {
+    drawCover(ctx, img, x, y, w, h, 0.5);
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.72)";
+    ctx.fillRect(x, y, w, h);
+    ctx.restore();
+  }
   ctx.drawImage(img, dx, dy, dw, dh);
-  return { x: dx, y: dy, w: dw, h: dh };
 }
 
 async function loadAll(sources) {
@@ -398,113 +362,164 @@ async function loadAll(sources) {
   return out;
 }
 
-function drawPhoto(ctx, imgs, top, photoH, fit) {
-  if (!imgs.length) return false;
-
-  const draw = fit === "cover" ? drawCover : drawContain;
-  const g  = PHOTO_GAP;
-  const hw = Math.floor((W - g) / 2);
-  const hh = Math.floor((photoH - g) / 2);
-
-  let firstRect;
-  if (imgs.length === 1) {
-    firstRect = draw(ctx, imgs[0], 0, top, W, photoH);
-  } else if (imgs.length === 2) {
-    firstRect = draw(ctx, imgs[0], 0,       top, hw,          photoH);
-    draw(ctx, imgs[1], hw + g,  top, W - hw - g,  photoH);
+// imgs already loaded; photoY = top edge, photoH = height (ends at poster bottom)
+function drawPhoto(ctx, imgs, photoY, photoH, collage) {
+  if (!collage || imgs.length === 1) {
+    drawContain(ctx, imgs[0], 0, photoY, W, photoH);
   } else {
-    firstRect = draw(ctx, imgs[0], 0,       top,          hw,          photoH);
-    draw(ctx, imgs[1], hw + g,  top,          W - hw - g,  hh);
-    draw(ctx, imgs[2], hw + g,  top + hh + g, W - hw - g,  photoH - hh - g);
-  }
-
-  // gradient at the TOP of the photo: solid black → transparent
-  let fadeTop, fadeLen;
-  if (fit === "cover") {
-    fadeTop = top;
-    fadeLen = Math.min(PHOTO_FADE_MAX, Math.max(120, Math.round(photoH * PHOTO_FADE_FRAC)));
-  } else {
-    // fit mode: start at the real top edge of a single photo; short fade
-    fadeTop = imgs.length === 1 ? firstRect.y : top;
-    fadeLen = PHOTO_FADE_CONTAIN;
-  }
-
-  const fade = ctx.createLinearGradient(0, fadeTop, 0, fadeTop + fadeLen);
-  fade.addColorStop(0.00, "rgba(0,0,0,1)");
-  fade.addColorStop(0.20, "rgba(0,0,0,0.85)");
-  fade.addColorStop(0.45, "rgba(0,0,0,0.50)");
-  fade.addColorStop(0.70, "rgba(0,0,0,0.18)");
-  fade.addColorStop(1.00, "rgba(0,0,0,0)");
-  ctx.fillStyle = fade;
-  ctx.fillRect(0, fadeTop, W, fadeLen);
-
-  return true;
-}
-
-// ═══════════════════════════════════════════════════════════════
-// FOOTER  –  brand logo / name on the left + dashed line to the right
-//   newsItem.logo       : logo image (url / path / buffer)  – used if given
-//   newsItem.brandName  : text brand (default: env BRAND_NAME)
-// ═══════════════════════════════════════════════════════════════
-
-async function drawFooter(ctx, newsItem, H) {
-  const cy = H - Math.round(FOOTER_H * 0.56);
-  let   endX = FOOTER_PAD_X;
-
-  let logo = null;
-  if (newsItem.logo) {
-    try { logo = await loadImage(newsItem.logo); }
-    catch (e) { console.warn("[Poster] logo failed:", e.message); }
-  }
-
-  if (logo) {
-    const lh = 56;
-    const lw = Math.min(320, Math.round((logo.width / logo.height) * lh));
-    const h2 = Math.round((logo.height / logo.width) * lw);
-    ctx.drawImage(logo, FOOTER_PAD_X, cy - h2 / 2, lw, h2);
-    endX = FOOTER_PAD_X + lw;
-  } else {
-    const name  = cleanText(newsItem.brandName || BRAND_NAME, true);
-    if (name) {
-      let first, rest, joiner = " ";
-      const parts = name.split(" ");
-      const m = parts.length === 1 && name.match(/^(\D+)(\d+)$/);
-      if (m) {                       // "NEWSLINE24" → NEWSLINE (yellow) + 24 (white)
-        first = m[1]; rest = m[2]; joiner = "";
-      } else {
-        first = parts[0];
-        rest  = parts.slice(1).join(" ");
-      }
-      const size  = 46;
-
-      ctx.save();
-      ctx.textAlign    = "left";
-      ctx.textBaseline = "alphabetic";
-      ctx.font         = `${size}px ${FOOT_FONT}`;
-      const base = cy + size * 0.33;
-
-      let x = FOOTER_PAD_X;
-      strokeFill(ctx, first, x, base, YELLOW, YELLOW, size * 0.03);
-      x += ctx.measureText(first).width;
-      if (rest) {
-        if (joiner) x += ctx.measureText(joiner).width;
-        strokeFill(ctx, rest, x, base, WHITE, WHITE, size * 0.03);
-        x += ctx.measureText(rest).width;
-      }
-      ctx.restore();
-      endX = x;
+    const g  = PHOTO_GAP;
+    const hw = Math.floor((W - g) / 2);
+    const hh = Math.floor((photoH - g) / 2);
+    if (imgs.length === 2) {
+      drawCover(ctx, imgs[0], 0,      photoY, hw,         photoH);
+      drawCover(ctx, imgs[1], hw + g, photoY, W - hw - g, photoH);
+    } else {
+      drawCover(ctx, imgs[0], 0,      photoY,          hw,         photoH);
+      drawCover(ctx, imgs[1], hw + g, photoY,          W - hw - g, hh);
+      drawCover(ctx, imgs[2], hw + g, photoY + hh + g, W - hw - g, photoH - hh - g);
     }
   }
 
-  // dashed line
+  // short fade from BLACK at the top edge of the photo (keeps faces visible)
+  const fadeLen = Math.round(H * PHOTO_FADE_FRAC);
+  const fade = ctx.createLinearGradient(0, photoY, 0, photoY + fadeLen);
+  fade.addColorStop(0.00, "rgba(0,0,0,1)");
+  fade.addColorStop(0.40, "rgba(0,0,0,0.65)");
+  fade.addColorStop(1.00, "rgba(0,0,0,0)");
+  ctx.fillStyle = fade;
+  ctx.fillRect(0, photoY - 1, W, fadeLen + 1);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ROUND INSETS  –  red border circles, bottom right over the photo
+// ═══════════════════════════════════════════════════════════════
+
+async function drawCircles(ctx, sources) {
+  const imgs = await loadAll(sources.slice(0, 2));
+  const r1 = Math.round(W * CIRCLE_1_R);
+  const r2 = Math.round(W * CIRCLE_2_R);
+
+  const c1 = { cx: W - r1 - CIRCLE_MARGIN, cy: H - r1 - CIRCLE_MARGIN, r: r1 };
+  const c2 = {
+    cx: W - r2 - CIRCLE_MARGIN - 10,
+    cy: c1.cy - r1 - r2 - 18,
+    r:  r2,
+  };
+  const specs = [c1, c2];
+
+  imgs.forEach((img, i) => {
+    const { cx, cy, r } = specs[i];
+
+    // dark backing so the ring looks clean on any photo
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + CIRCLE_BORDER, 0, Math.PI * 2);
+    ctx.fillStyle = "#000000";
+    ctx.fill();
+    ctx.restore();
+
+    // photo inside the circle
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.clip();
+    drawCover(ctx, img, cx - r, cy - r, r * 2, r * 2, 0.25);
+    ctx.restore();
+
+    // red ring
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + CIRCLE_BORDER / 2 - 1, 0, Math.PI * 2);
+    ctx.lineWidth   = CIRCLE_BORDER;
+    ctx.strokeStyle = RED;
+    ctx.stroke();
+    ctx.restore();
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CREDIT LINE  –  [f] [youtube] [instagram] [whatsapp]  name
+//   newsItem.credit / brandName : text (default BRAND_NAME)
+//   newsItem.showCredit = false : hide the line
+// ═══════════════════════════════════════════════════════════════
+
+function drawSocialIcon(ctx, kind, x, cy, s) {
+  const y = cy - s / 2;
   ctx.save();
-  ctx.strokeStyle = "#bdbdbd";
-  ctx.lineWidth   = 2;
-  ctx.setLineDash([7, 5]);
-  ctx.beginPath();
-  ctx.moveTo(endX + 18, cy);
-  ctx.lineTo(W - FOOTER_PAD_X, cy);
+  ctx.strokeStyle = WHITE;
+  ctx.fillStyle   = WHITE;
+  ctx.lineWidth   = 2.5;
+  ctx.lineJoin    = "round";
+
+  rrect(ctx, x, y, s, s, s * 0.28);
   ctx.stroke();
+
+  if (kind === "f") {
+    ctx.font = `${Math.round(s * 0.82)}px English`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText("f", x + s / 2, y + s * 0.84);
+  } else if (kind === "yt") {
+    rrect(ctx, x + s * 0.2, y + s * 0.3, s * 0.6, s * 0.4, s * 0.1);
+    ctx.fill();
+    ctx.fillStyle = BLACK;
+    ctx.beginPath();
+    ctx.moveTo(x + s * 0.44, y + s * 0.39);
+    ctx.lineTo(x + s * 0.44, y + s * 0.61);
+    ctx.lineTo(x + s * 0.64, y + s * 0.5);
+    ctx.closePath();
+    ctx.fill();
+  } else if (kind === "ig") {
+    ctx.beginPath();
+    ctx.arc(x + s / 2, cy, s * 0.22, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x + s * 0.76, y + s * 0.24, s * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (kind === "wa") {
+    ctx.beginPath();
+    ctx.arc(x + s / 2, cy - s * 0.02, s * 0.25, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x + s * 0.27, y + s * 0.78);
+    ctx.lineTo(x + s * 0.33, y + s * 0.6);
+    ctx.lineTo(x + s * 0.42, y + s * 0.72);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawCredit(ctx, newsItem, cy) {
+  if (newsItem.showCredit === false) return;
+
+  const name  = String(newsItem.credit || newsItem.brandName || BRAND_NAME || "").trim();
+  const s     = CREDIT_ICON;
+  const gap   = 9;
+  const kinds = ["f", "yt", "ig", "wa"];
+
+  ctx.save();
+  ctx.font = `${CREDIT_SIZE}px English, Malayalam`;
+  const tw     = name ? ctx.measureText(name).width : 0;
+  const iconsW = kinds.length * s + (kinds.length - 1) * gap;
+  const total  = iconsW + (name ? 16 + tw : 0);
+  let x = Math.round((W - total) / 2);
+
+  ctx.shadowColor = "rgba(0,0,0,0.6)";
+  ctx.shadowBlur  = 6;
+
+  kinds.forEach((k) => {
+    drawSocialIcon(ctx, k, x, cy, s);
+    x += s + gap;
+  });
+
+  if (name) {
+    x += 16 - gap;
+    ctx.textAlign    = "left";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle    = WHITE;
+    ctx.fillText(name, x, cy + CREDIT_SIZE * 0.34);
+  }
   ctx.restore();
 }
 
@@ -512,83 +527,101 @@ async function drawFooter(ctx, newsItem, H) {
 // MAIN POSTER DRAW
 //
 //   newsItem options:
-//     title                 top title (alternating big / small lines,
-//                           light-yellow lines, last line white)
-//     titleLines            force the title line breaks
-//     titleBlackLines       how many LAST title lines are white (default 1)
-//     uppercase   true      upper-case all text
-//     showPhoto   false     no photo
-//     photoFit              "contain" (default, whole photo visible) | "cover" (zoom/crop)
-//     image / images        photo(s): url / path / buffer (images = collage, max 3)
-//     logo / brandName      footer brand
+//     title             the headline (first lines white, last lines yellow)
+//     titleLines        force the title line breaks
+//     titleWhiteLines   how many lines are white (default ~45% of the lines)
+//     uppercase  true   upper-case all text
+//     showPhoto  false  no photo
+//     image / images    main photo; extra images become the round insets
+//     circles           [img1, img2] explicit round insets
+//     collage    true   draw `images` as a collage instead of insets
+//     credit / brandName  text next to the social icons
+//     showCredit false  hide the credit line
 // ═══════════════════════════════════════════════════════════════
 
 async function createNewsPoster(newsItem) {
 
-  // ── 1. Measure the title (top) on a small scratch canvas ────
-  const mctx = createCanvas(W, 10).getContext("2d");
-  const head = buildTitle(newsItem);
-
-  let titleL      = null;
-  let titleBottom = 0;
-  if (head) {
-    titleL = fitWithFallback(mctx, head, HEAD_FONT, {
-      max: TITLE_MAX, min: TITLE_MIN,
-      maxW: TITLE_MAX_W, maxLines: TITLE_MAX_LINES,
-      maxH: Math.min(TITLE_MAX_H, BASE_H - FOOTER_H - PHOTO_MIN_H - TITLE_PAD_TOP - TITLE_PAD_BOTTOM),
-    });
-    titleBottom = TITLE_PAD_TOP + titleL.total + TITLE_PAD_BOTTOM;
-  }
-
-  // ── 2. Load the photo(s) ────────────────────────────────────
-  const sources = [];
-  if (Array.isArray(newsItem.images)) sources.push(...newsItem.images.filter(Boolean));
-  else if (newsItem.image) sources.push(newsItem.image);
-  if (!sources.length && newsItem.image) sources.push(newsItem.image);
-
-  const imgs = newsItem.showPhoto !== false && sources.length
-    ? await loadAll(sources.slice(0, 3))
-    : [];
-
-  const fit = newsItem.photoFit === "cover" ? "cover" : "contain";
-
-  // ── 3. Poster height: with ONE photo it follows the photo ───
-  let H = BASE_H;
-  if (imgs.length === 1 && fit === "contain") {
-    const natural = Math.round(W * imgs[0].height / imgs[0].width);
-    H = clamp(titleBottom + natural + FOOTER_H, H_MIN, H_MAX);
-  }
-
-  const contentBottom = H - FOOTER_H;
-  const photoTop = fit === "cover"
-    ? Math.max(0, titleBottom - (titleL ? PHOTO_OVERLAP : 0))
-    : titleBottom;
-  const photoH = Math.max(100, contentBottom - photoTop);
-
-  // ── 4. Draw ─────────────────────────────────────────────────
   const canvas = createCanvas(W, H);
   const ctx    = canvas.getContext("2d");
 
-  ctx.fillStyle = BG;
+  // ── 1. Black background ─────────────────────────────────────
+  ctx.fillStyle = BLACK;
   ctx.fillRect(0, 0, W, H);
 
-  if (imgs.length) drawPhoto(ctx, imgs, photoTop, photoH, fit);
+  // ── 2. Photo sources ────────────────────────────────────────
+  const all = [];
+  if (Array.isArray(newsItem.images)) all.push(...newsItem.images.filter(Boolean));
+  else if (newsItem.image) all.push(newsItem.image);
+  if (!all.length && newsItem.image) all.push(newsItem.image);
 
-  if (titleL) {
-    const whiteCount = titleL.lines.length > 1
-      ? Math.min(Number.isInteger(newsItem.titleBlackLines) ? newsItem.titleBlackLines : 1, titleL.lines.length - 1)
-      : 0;
-    drawTitle(ctx, titleL, TITLE_PAD_TOP, whiteCount);
+  const collage = newsItem.collage === true;
+  let mainSources, circleSources;
+  if (collage) {
+    mainSources   = all;
+    circleSources = (newsItem.circles || []).filter(Boolean);
+  } else {
+    mainSources   = all.slice(0, 1);
+    circleSources = (newsItem.circles && newsItem.circles.length
+      ? newsItem.circles
+      : all.slice(1)).filter(Boolean);
   }
 
-  await drawFooter(ctx, newsItem, H);
+  // ── 3. Load the main photo(s) and decide the photo area ─────
+  let mainImgs = [];
+  if (newsItem.showPhoto !== false && mainSources.length) {
+    mainImgs = await loadAll(mainSources.slice(0, 3));
+  }
+  const hasPhoto = mainImgs.length > 0;
 
-  // ── 5. Reset ────────────────────────────────────────────────
+  let photoH = 0;
+  if (hasPhoto) {
+    if (collage && mainImgs.length > 1) {
+      photoH = Math.round(H * COLLAGE_FRAC);
+    } else {
+      // area height follows the photo's own shape so the whole photo fits
+      const natural = Math.round(W * (mainImgs[0].height / mainImgs[0].width));
+      photoH = Math.max(
+        Math.round(H * PHOTO_MIN_FRAC),
+        Math.min(Math.round(H * PHOTO_MAX_FRAC), natural)
+      );
+    }
+  }
+  const photoY = H - photoH;
+
+  // ── 4. Photo + round insets ─────────────────────────────────
+  if (hasPhoto) {
+    drawPhoto(ctx, mainImgs, photoY, photoH, collage);
+    if (circleSources.length) await drawCircles(ctx, circleSources);
+  }
+
+  // ── 5. Credit line (band right above the photo) ─────────────
+  const creditBottom = hasPhoto ? photoY : H - Math.round(H * 0.03);
+  const creditCY     = creditBottom - Math.round(CREDIT_BAND / 2);
+  drawCredit(ctx, newsItem, creditCY);
+
+  // ── 6. Title (top) – fitted and centered in the free area ───
+  const title = buildTitle(newsItem);
+  if (title) {
+    const areaTop    = TEXT_TOP_PAD;
+    const areaBottom = creditBottom - CREDIT_BAND - TEXT_GAP;
+    const availH     = Math.max(100, areaBottom - areaTop);
+    const fit        = fitTitle(ctx, title, availH);
+
+    const textTop = areaTop + Math.max(0, Math.round((availH - fit.total) / 2));
+
+    const n = fit.lines.length;
+    const whiteCount = Number.isInteger(newsItem.titleWhiteLines)
+      ? Math.max(0, Math.min(newsItem.titleWhiteLines, n))
+      : n <= 1 ? n : Math.max(1, Math.round(n * WHITE_FRACTION));
+
+    drawTitle(ctx, fit.lines, textTop, whiteCount);
+  }
+
+  // ── 7. Reset ────────────────────────────────────────────────
   ctx.textAlign    = "left";
   ctx.textBaseline = "alphabetic";
 
   const buffer = await canvasToBuffer(canvas, "image/png");
-  // no ad strip any more: liveAdVideoUrl is always null, adH is 0
   return { type: "image", buffer, liveAdVideoUrl: null, adH: 0 };
 }
 
